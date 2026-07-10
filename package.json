@@ -6,21 +6,38 @@
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
-    "lint": "eslint"
+    "lint": "eslint",
+    "db": "docker start clone-auer-db 2>/dev/null || docker run -d --name clone-auer-db --restart unless-stopped -e POSTGRES_USER=auer -e POSTGRES_PASSWORD=auer -e POSTGRES_DB=auer -p 5433:5432 postgres:16-alpine",
+    "db:logs": "docker logs clone-auer-db --tail 50",
+    "seed": "tsx prisma/seed.ts",
+    "deploy:build": "docker compose --env-file .env.deploy -f docker-compose.prod.yml build",
+    "deploy:up": "docker compose --env-file .env.deploy -f docker-compose.prod.yml up -d",
+    "deploy:down": "docker compose --env-file .env.deploy -f docker-compose.prod.yml down",
+    "deploy:logs": "docker compose --env-file .env.deploy -f docker-compose.prod.yml logs -f app",
+    "deploy:seed": "docker compose --env-file .env.deploy -f docker-compose.prod.yml run --rm migrate npx tsx prisma/seed.ts"
   },
   "dependencies": {
+    "@prisma/client": "^6.19.3",
+    "bcryptjs": "^3.0.3",
+    "exceljs": "^4.4.0",
+    "fast-xml-parser": "^5.9.3",
     "next": "16.2.10",
+    "next-auth": "^5.0.0-beta.31",
+    "prisma": "^6.19.3",
     "react": "19.2.4",
-    "react-dom": "19.2.4"
+    "react-dom": "19.2.4",
+    "zod": "^4.4.3"
   },
   "devDependencies": {
     "@tailwindcss/postcss": "^4",
+    "@types/bcryptjs": "^2.4.6",
     "@types/node": "^20",
     "@types/react": "^19",
     "@types/react-dom": "^19",
     "eslint": "^9",
     "eslint-config-next": "16.2.10",
     "tailwindcss": "^4",
+    "tsx": "^4.23.0",
     "typescript": "^5"
   }
 }

@@ -1,0 +1,5 @@
+-- AlterTable
+ALTER TABLE "Lv" ADD COLUMN     "deckungsruecklass" DECIMAL(5,2) NOT NULL DEFAULT 0,
+ADD COLUMN     "haftruecklass" DECIMAL(5,2) NOT NULL DEFAULT 0,
+ADD COLUMN     "skonto" DECIMAL(5,2) NOT NULL DEFAULT 0,
+ADD COLUMN     "skontoTage" INTEGER NOT NULL DEFAULT 0;

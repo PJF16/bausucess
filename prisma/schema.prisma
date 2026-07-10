@@ -1,0 +1,413 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ── Mandanten & Benutzer ────────────────────────────────────────────
+
+model Tenant {
+  id        String   @id @default(cuid())
+  name      String
+  createdAt DateTime @default(now())
+
+  memberships Membership[]
+  projekte    Projekt[]
+  bieter      Bieter[]
+  lbGruppen   LbGruppe[]
+}
+
+model User {
+  id           String   @id @default(cuid())
+  email        String   @unique
+  name         String
+  passwordHash String
+  createdAt    DateTime @default(now())
+
+  memberships Membership[]
+}
+
+enum Rolle {
+  ADMIN
+  BEARBEITER
+  LESER
+}
+
+model Membership {
+  id       String @id @default(cuid())
+  userId   String
+  tenantId String
+  rolle    Rolle  @default(BEARBEITER)
+
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, tenantId])
+}
+
+// ── Projekte & Leistungsverzeichnisse ───────────────────────────────
+
+model Projekt {
+  id          String   @id @default(cuid())
+  tenantId    String
+  nummer      String
+  bezeichnung String
+  auftraggeber String?
+  ort         String?
+  status      ProjektStatus @default(AKTIV)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  lvs    Lv[]
+
+  @@unique([tenantId, nummer])
+}
+
+enum ProjektStatus {
+  AKTIV
+  ABGESCHLOSSEN
+  ARCHIVIERT
+}
+
+enum LvArt {
+  ENTWURFS_LV
+  KOSTENSCHAETZUNGS_LV
+  AUSSCHREIBUNGS_LV
+  ANGEBOTS_LV
+  VERTRAGS_LV
+  ABRECHNUNGS_LV
+}
+
+model Lv {
+  id          String   @id @default(cuid())
+  projektId   String
+  bezeichnung String
+  art         LvArt    @default(AUSSCHREIBUNGS_LV)
+  waehrung    String   @default("EUR")
+  ustSatz     Decimal  @default(20) @db.Decimal(5, 2)
+  // Abrechnungskonditionen (ÖNORM B 2110-Praxis):
+  // Deckungsrücklass wird bei Teilrechnungen einbehalten,
+  // Haftrücklass bei der Schlussrechnung (Gewährleistungssicherheit).
+  deckungsruecklass Decimal @default(0) @db.Decimal(5, 2) // %
+  haftruecklass     Decimal @default(0) @db.Decimal(5, 2) // %
+  skonto            Decimal @default(0) @db.Decimal(5, 2) // %
+  skontoTage        Int     @default(0)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  projekt   Projekt     @relation(fields: [projektId], references: [id], onDelete: Cascade)
+  gruppen   LvGruppe[]
+  positionen Position[]
+  kalkulation Kalkulation?
+  angebote  Angebot[]
+  aufmassblaetter Aufmassblatt[]
+  rechnungen Rechnung[]
+  nachtraege Nachtrag[]
+}
+
+// Hierarchie nach ÖNORM: HG (Hauptgruppe), OG (Obergruppe),
+// LG (Leistungsgruppe), ULG (Unterleistungsgruppe)
+enum GruppenEbene {
+  HG
+  OG
+  LG
+  ULG
+}
+
+model LvGruppe {
+  id          String       @id @default(cuid())
+  lvId        String
+  parentId    String?
+  ebene       GruppenEbene
+  nummer      String // z. B. "01" für LG, "01.02" kombiniert sich über die Hierarchie
+  bezeichnung String
+  sortier     Int          @default(0)
+
+  lv       Lv         @relation(fields: [lvId], references: [id], onDelete: Cascade)
+  parent   LvGruppe?  @relation("GruppenHierarchie", fields: [parentId], references: [id], onDelete: Cascade)
+  kinder   LvGruppe[] @relation("GruppenHierarchie")
+  positionen Position[]
+
+  @@index([lvId, parentId])
+}
+
+enum PositionsArt {
+  NORMAL          // Normalposition
+  WESENTLICH      // Wesentliche Position
+  EVENTUAL        // Eventualposition
+  ALTERNATIV      // Alternativposition (Wahlposition)
+  REGIE           // Regieposition
+}
+
+model Position {
+  id          String       @id @default(cuid())
+  lvId        String
+  gruppeId    String
+  nummer      String // Positionsnummer innerhalb der Gruppe, z. B. "01A"
+  stichwort   String
+  langtext    String       @default("")
+  einheit     String       @default("m²") // ME nach ÖNORM (m, m², m³, kg, Stk, h, PA …)
+  menge       Decimal      @default(0) @db.Decimal(14, 3)
+  art         PositionsArt @default(NORMAL)
+  // Preisanteile nach ÖNORM B 2061: Lohn + Sonstiges = Einheitspreis
+  epLohn      Decimal      @default(0) @db.Decimal(14, 2)
+  epSonstiges Decimal      @default(0) @db.Decimal(14, 2)
+  sortier     Int          @default(0)
+
+  lv            Lv                 @relation(fields: [lvId], references: [id], onDelete: Cascade)
+  gruppe        LvGruppe           @relation(fields: [gruppeId], references: [id], onDelete: Cascade)
+  ansaetze      KalkAnsatz[]
+  angebotspreise AngebotsPosition[]
+  aufmasszeilen Aufmasszeile[]
+
+  @@index([lvId])
+  @@index([gruppeId])
+}
+
+// ── Kalkulation (ÖNORM B 2061, vereinfacht) ─────────────────────────
+
+// Kalkulationsblatt je LV: Mittellohnkosten + Gesamtzuschläge je Kostenart.
+// Mittellohnpreis = Mittellohnkosten × (1 + zuschlagLohn/100)
+model Kalkulation {
+  id               String   @id @default(cuid())
+  lvId             String   @unique
+  mittellohnkosten Decimal  @default(40) @db.Decimal(10, 2) // €/h
+  zuschlagLohn     Decimal  @default(85) @db.Decimal(6, 2) // % (GGK, BGK, Wagnis & Gewinn)
+  zuschlagMaterial Decimal  @default(12) @db.Decimal(6, 2) // %
+  zuschlagGeraet   Decimal  @default(15) @db.Decimal(6, 2) // %
+  zuschlagFremd    Decimal  @default(8) @db.Decimal(6, 2) // %
+  zuschlagSonstiges Decimal @default(12) @db.Decimal(6, 2) // %
+  updatedAt        DateTime @updatedAt
+
+  lv       Lv           @relation(fields: [lvId], references: [id], onDelete: Cascade)
+  ansaetze KalkAnsatz[]
+}
+
+enum AnsatzArt {
+  LOHN          // Stunden × Mittellohnpreis
+  MATERIAL
+  GERAET
+  FREMDLEISTUNG
+  SONSTIGES
+}
+
+// Detailkalkulation je Position (K7-Blatt): Ansätze je Einheit der Position
+model KalkAnsatz {
+  id            String    @id @default(cuid())
+  kalkulationId String
+  positionId    String
+  art           AnsatzArt @default(MATERIAL)
+  bezeichnung   String
+  menge         Decimal   @default(0) @db.Decimal(14, 4) // Ansatz je LV-Einheit (z. B. 0,85 h/m²)
+  einheit       String    @default("h")
+  preis         Decimal   @default(0) @db.Decimal(14, 2) // €/Einheit; bei LOHN implizit Mittellohnpreis
+  sortier       Int       @default(0)
+
+  kalkulation Kalkulation @relation(fields: [kalkulationId], references: [id], onDelete: Cascade)
+  position    Position    @relation(fields: [positionId], references: [id], onDelete: Cascade)
+
+  @@index([positionId])
+}
+
+// ── Ausschreibung & Vergabe ──────────────────────────────────────────
+
+// Bieter sind mandantenweit gepflegt und über Projekte hinweg wiederverwendbar.
+model Bieter {
+  id              String   @id @default(cuid())
+  tenantId        String
+  firma           String
+  ansprechpartner String?
+  email           String?
+  telefon         String?
+  adresse         String?
+  createdAt       DateTime @default(now())
+
+  tenant   Tenant    @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  angebote Angebot[]
+}
+
+enum AngebotStatus {
+  EINGELADEN
+  ABGEGEBEN
+  AUSGESCHIEDEN
+  ZUSCHLAG
+}
+
+// Ein Bieter, eingeladen zu genau einem (Ausschreibungs-)LV.
+model Angebot {
+  id        String        @id @default(cuid())
+  lvId      String
+  bieterId  String
+  status    AngebotStatus @default(EINGELADEN)
+  notiz     String        @default("")
+  createdAt DateTime      @default(now())
+
+  lv     Lv                 @relation(fields: [lvId], references: [id], onDelete: Cascade)
+  bieter Bieter             @relation(fields: [bieterId], references: [id], onDelete: Cascade)
+  preise AngebotsPosition[]
+
+  @@unique([lvId, bieterId])
+}
+
+// Angebotspreis des Bieters je LV-Position (Preisspiegel-Zelle).
+// Bewusst ein einzelner EP statt Lohn/Sonstiges-Split – der Preisspiegel
+// vergleicht Gesamtpreise; die Aufteilung erfolgt erst beim Anlegen des
+// Vertrags-LV (proportional zum Lohnanteil des Ausschreibungs-LV).
+model AngebotsPosition {
+  id         String  @id @default(cuid())
+  angebotId  String
+  positionId String
+  ep         Decimal @default(0) @db.Decimal(14, 2)
+
+  angebot  Angebot  @relation(fields: [angebotId], references: [id], onDelete: Cascade)
+  position Position @relation(fields: [positionId], references: [id], onDelete: Cascade)
+
+  @@unique([angebotId, positionId])
+}
+
+// ── Abrechnung ───────────────────────────────────────────────────────
+
+// Aufmaßblatt: organisatorische Klammer für Aufmaßzeilen (z. B. je Bauteil/Woche)
+model Aufmassblatt {
+  id          String   @id @default(cuid())
+  lvId        String
+  nummer      Int
+  bezeichnung String
+  createdAt   DateTime @default(now())
+
+  lv     Lv             @relation(fields: [lvId], references: [id], onDelete: Cascade)
+  zeilen Aufmasszeile[]
+
+  @@unique([lvId, nummer])
+}
+
+// Aufmaßzeile: Mengenermittlung je Position. `ansatz` ist eine Rechenformel
+// (z. B. "12,50*3,20-2*1,01"), aus der `menge` berechnet wird. Sobald die
+// Zeile einer Rechnung zugeordnet ist, ist sie gesperrt (abgerechnet).
+model Aufmasszeile {
+  id          String  @id @default(cuid())
+  blattId     String
+  positionId  String
+  rechnungId  String?
+  bezeichnung String  @default("")
+  ansatz      String  @default("")
+  menge       Decimal @default(0) @db.Decimal(14, 3)
+  sortier     Int     @default(0)
+
+  blatt    Aufmassblatt @relation(fields: [blattId], references: [id], onDelete: Cascade)
+  position Position     @relation(fields: [positionId], references: [id], onDelete: Cascade)
+  rechnung Rechnung?    @relation(fields: [rechnungId], references: [id], onDelete: SetNull)
+
+  @@index([positionId])
+  @@index([blattId])
+  @@index([rechnungId])
+}
+
+enum RechnungArt {
+  TEILRECHNUNG
+  SCHLUSSRECHNUNG
+}
+
+enum RechnungStatus {
+  ENTWURF
+  GELEGT
+  BEZAHLT
+}
+
+// Rechnung: rechnet die ihr zugeordneten Aufmaßzeilen ab (inkrementell –
+// jede Zeile gehört zu genau einer Rechnung).
+model Rechnung {
+  id     String         @id @default(cuid())
+  lvId   String
+  nummer Int
+  art    RechnungArt    @default(TEILRECHNUNG)
+  status RechnungStatus @default(ENTWURF)
+  datum  DateTime       @default(now())
+
+  lv     Lv             @relation(fields: [lvId], references: [id], onDelete: Cascade)
+  zeilen Aufmasszeile[]
+
+  @@unique([lvId, nummer])
+}
+
+// ── Nachträge (Zusatz-/Minderleistungen) ─────────────────────────────
+
+enum NachtragStatus {
+  ANGEBOTEN
+  BEAUFTRAGT
+  ABGELEHNT
+}
+
+model Nachtrag {
+  id           String         @id @default(cuid())
+  lvId         String
+  nummer       Int
+  bezeichnung  String
+  status       NachtragStatus @default(ANGEBOTEN)
+  notiz        String         @default("")
+  createdAt    DateTime       @default(now())
+  beauftragtAm DateTime?
+
+  lv         Lv                  @relation(fields: [lvId], references: [id], onDelete: Cascade)
+  positionen NachtragsPosition[]
+
+  @@unique([lvId, nummer])
+}
+
+// Positionen eines Nachtrags. Bei Beauftragung werden sie als reguläre
+// LV-Positionen in eine eigene Nachtrags-Gruppe übernommen (und sind damit
+// im Aufmaß abrechenbar); uebernommenePositionId hält die Verknüpfung.
+model NachtragsPosition {
+  id          String  @id @default(cuid())
+  nachtragId  String
+  nummer      String
+  stichwort   String
+  langtext    String  @default("")
+  einheit     String  @default("m²")
+  menge       Decimal @default(0) @db.Decimal(14, 3)
+  epLohn      Decimal @default(0) @db.Decimal(14, 2)
+  epSonstiges Decimal @default(0) @db.Decimal(14, 2)
+  sortier     Int     @default(0)
+
+  uebernommenePositionId String?
+
+  nachtrag Nachtrag @relation(fields: [nachtragId], references: [id], onDelete: Cascade)
+
+  @@index([nachtragId])
+}
+
+// ── Leistungsbuch (mandantenweiter Stammpositionen-Katalog) ──────────
+
+model LbGruppe {
+  id          String  @id @default(cuid())
+  tenantId    String
+  parentId    String?
+  nummer      String
+  bezeichnung String
+  sortier     Int     @default(0)
+
+  tenant     Tenant       @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  parent     LbGruppe?    @relation("LbHierarchie", fields: [parentId], references: [id], onDelete: Cascade)
+  kinder     LbGruppe[]   @relation("LbHierarchie")
+  positionen LbPosition[]
+
+  @@index([tenantId, parentId])
+}
+
+model LbPosition {
+  id        String @id @default(cuid())
+  gruppeId  String
+  nummer    String
+  stichwort String
+  langtext  String @default("")
+  einheit   String @default("m²")
+  sortier   Int    @default(0)
+
+  gruppe LbGruppe @relation(fields: [gruppeId], references: [id], onDelete: Cascade)
+
+  @@index([gruppeId])
+}

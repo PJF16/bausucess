@@ -24,7 +24,13 @@ export function ProjektEinstellungen({ projekt }: { projekt: ProjektDaten }) {
     );
     if (!ok) return;
     startTransition(async () => {
-      await projektLoeschen(projekt.id);
+      try {
+        await projektLoeschen(projekt.id);
+      } catch {
+        window.alert(
+          "Das Projekt enthält gelegte Rechnungen und kann nicht gelöscht werden – bitte stattdessen den Status auf „Archiviert“ setzen."
+        );
+      }
     });
   };
 

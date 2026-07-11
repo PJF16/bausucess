@@ -48,6 +48,19 @@ export async function projektAendern(projektId: string, formData: FormData) {
 
 export async function projektLoeschen(projektId: string) {
   const user = await requireBearbeiter();
+  // Gelegte/bezahlte Rechnungen sind Belege – ein Projekt mit solchen
+  // Rechnungen darf nicht per Kaskade verschwinden.
+  const belege = await prisma.rechnung.count({
+    where: {
+      status: { not: "ENTWURF" },
+      lv: { projekt: { id: projektId, tenantId: user.tenantId } },
+    },
+  });
+  if (belege > 0) {
+    throw new Error(
+      "Das Projekt enthält gelegte Rechnungen und kann nicht gelöscht werden – bitte stattdessen archivieren"
+    );
+  }
   await prisma.projekt.deleteMany({
     where: { id: projektId, tenantId: user.tenantId },
   });
@@ -75,6 +88,18 @@ export async function lvAnlegen(projektId: string, formData: FormData) {
 
 export async function lvLoeschen(projektId: string, lvId: string) {
   const user = await requireBearbeiter();
+  const belege = await prisma.rechnung.count({
+    where: {
+      lvId,
+      status: { not: "ENTWURF" },
+      lv: { projekt: { id: projektId, tenantId: user.tenantId } },
+    },
+  });
+  if (belege > 0) {
+    throw new Error(
+      "Das LV enthält gelegte Rechnungen und kann nicht gelöscht werden"
+    );
+  }
   await prisma.lv.deleteMany({
     where: { id: lvId, projekt: { id: projektId, tenantId: user.tenantId } },
   });
@@ -137,6 +162,10 @@ export async function lvDuplizieren(projektId: string, lvId: string) {
         art: lv.art,
         waehrung: lv.waehrung,
         ustSatz: lv.ustSatz,
+        deckungsruecklass: lv.deckungsruecklass,
+        haftruecklass: lv.haftruecklass,
+        skonto: lv.skonto,
+        skontoTage: lv.skontoTage,
       },
     });
 

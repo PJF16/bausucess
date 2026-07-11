@@ -50,7 +50,8 @@ export interface AbrRechnung {
   nummer: number;
   art: string;
   status: string;
-  netto: number;
+  betrag: number;
+  betragIstZahlbetrag: boolean;
 }
 
 const euro = new Intl.NumberFormat("de-AT", {
@@ -75,6 +76,7 @@ function AbrechnungKopf({
   blaetter,
   rechnungen,
   offeneZeilen,
+  hatZeilen,
   basisPfad,
   readonly,
 }: {
@@ -82,12 +84,16 @@ function AbrechnungKopf({
   blaetter: AbrBlatt[];
   rechnungen: AbrRechnung[];
   offeneZeilen: number;
+  hatZeilen: boolean;
   basisPfad: string;
   readonly: boolean;
 }) {
   const [pending, startTransition] = useTransition();
   const [neuBezeichnung, setNeuBezeichnung] = useState("");
   const [fehler, setFehler] = useState<string | null>(null);
+
+  const srVorhanden = rechnungen.some((r) => r.art === "SCHLUSSRECHNUNG");
+  const entwurfVorhanden = rechnungen.some((r) => r.status === "ENTWURF");
 
   const anlegen = () => {
     if (!neuBezeichnung.trim()) return;
@@ -163,10 +169,10 @@ function AbrechnungKopf({
                     ? "bg-blue-100 text-blue-800"
                     : "bg-amber-100 text-amber-800"
               }`}
-              title={`${r.art === "SCHLUSSRECHNUNG" ? "Schlussrechnung" : "Teilrechnung"} · ${rechnungStatusLabel[r.status]}`}
+              title={`${r.art === "SCHLUSSRECHNUNG" ? "Schlussrechnung" : "Teilrechnung"} · ${rechnungStatusLabel[r.status]} · ${r.betragIstZahlbetrag ? "Zahlbetrag brutto" : "Leistungssumme netto (Entwurf)"}`}
             >
               {r.art === "SCHLUSSRECHNUNG" ? "SR" : "TR"} {r.nummer} ·{" "}
-              {euro.format(r.netto)}
+              {euro.format(r.betrag)}
             </Link>
           ))}
           {!readonly && (
@@ -174,14 +180,23 @@ function AbrechnungKopf({
               <button
                 onClick={() =>
                   startTransition(async () => {
-                    await rechnungErstellen(lvId, "TEILRECHNUNG");
+                    setFehler(null);
+                    try {
+                      await rechnungErstellen(lvId, "TEILRECHNUNG");
+                    } catch {
+                      setFehler(
+                        "Teilrechnung kann nicht erstellt werden – nach der Schlussrechnung sind keine weiteren Rechnungen möglich."
+                      );
+                    }
                   })
                 }
-                disabled={offeneZeilen === 0}
+                disabled={offeneZeilen === 0 || srVorhanden}
                 title={
-                  offeneZeilen === 0
-                    ? "Keine offenen Aufmaßzeilen"
-                    : `${offeneZeilen} offene Aufmaßzeilen abrechnen`
+                  srVorhanden
+                    ? "Nach der Schlussrechnung sind keine weiteren Rechnungen möglich"
+                    : offeneZeilen === 0
+                      ? "Keine offenen Aufmaßzeilen"
+                      : `${offeneZeilen} offene Aufmaßzeilen abrechnen`
                 }
                 className="rounded bg-blue-800 px-2 py-1 text-xs font-semibold text-white hover:bg-blue-900 disabled:opacity-40"
               >
@@ -190,10 +205,26 @@ function AbrechnungKopf({
               <button
                 onClick={() =>
                   startTransition(async () => {
-                    await rechnungErstellen(lvId, "SCHLUSSRECHNUNG");
+                    setFehler(null);
+                    try {
+                      await rechnungErstellen(lvId, "SCHLUSSRECHNUNG");
+                    } catch {
+                      setFehler(
+                        "Schlussrechnung kann nicht erstellt werden – zuerst alle Entwurfsrechnungen legen oder löschen."
+                      );
+                    }
                   })
                 }
-                disabled={offeneZeilen === 0}
+                disabled={!hatZeilen || srVorhanden || entwurfVorhanden}
+                title={
+                  srVorhanden
+                    ? "Es existiert bereits eine Schlussrechnung"
+                    : entwurfVorhanden
+                      ? "Zuerst alle Entwurfsrechnungen legen oder löschen"
+                      : !hatZeilen
+                        ? "Es sind noch keine Aufmaßzeilen erfasst"
+                        : "Endabrechnung inkl. Rücklassauflösung"
+                }
                 className="rounded border border-blue-800 px-2 py-1 text-xs font-semibold text-blue-800 hover:bg-blue-50 disabled:opacity-40"
               >
                 Schlussrechnung
@@ -517,6 +548,7 @@ export function AbrechnungEditor({
         blaetter={blaetter}
         rechnungen={rechnungen}
         offeneZeilen={offeneZeilen}
+        hatZeilen={zeilen.length > 0}
         basisPfad={basisPfad}
         readonly={!darfBearbeiten}
       />

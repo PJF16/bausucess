@@ -90,6 +90,18 @@ export async function nachtragBeauftragen(lvId: string, nachtragId: string) {
   }
 
   await prisma.$transaction(async (tx) => {
+    // Status als ERSTE Operation bedingt umsetzen: Bei zwei gleichzeitigen
+    // Beauftragungen (zwei Tabs/Nutzer) gewinnt genau eine Transaktion, die
+    // zweite findet keinen offenen Nachtrag mehr und bricht ab – sonst
+    // würden die Positionen doppelt ins LV übernommen.
+    const beauftragt = await tx.nachtrag.updateMany({
+      where: { id: nachtragId, lvId, status: "ANGEBOTEN" },
+      data: { status: "BEAUFTRAGT", beauftragtAm: new Date() },
+    });
+    if (beauftragt.count === 0) {
+      throw new Error("Nachtrag wurde bereits beauftragt");
+    }
+
     const maxSortier = await tx.lvGruppe.aggregate({
       where: { lvId, parentId: null },
       _max: { sortier: true },
@@ -126,11 +138,6 @@ export async function nachtragBeauftragen(lvId: string, nachtragId: string) {
         data: { uebernommenePositionId: position.id },
       });
     }
-
-    await tx.nachtrag.update({
-      where: { id: nachtrag.id },
-      data: { status: "BEAUFTRAGT", beauftragtAm: new Date() },
-    });
   });
 
   revalidatePath(ntPfad(lv.projektId, lvId));
@@ -149,6 +156,34 @@ export interface NtPositionsDaten {
   epSonstiges: number;
 }
 
+function endlicheZahl(wert: unknown, feld: string): number {
+  if (typeof wert !== "number" || !Number.isFinite(wert)) {
+    throw new Error(`Ungültiger Wert für ${feld}`);
+  }
+  return wert;
+}
+
+/**
+ * Übernimmt nur die bekannten Felder (Server Actions sind öffentliche
+ * Endpunkte – ein Spread der Client-Daten könnte sonst nachtragId oder
+ * uebernommenePositionId überschreiben) und validiert die Zahlen.
+ */
+function ntPositionsDaten(
+  daten: Partial<NtPositionsDaten>
+): Partial<NtPositionsDaten> {
+  const d: Partial<NtPositionsDaten> = {};
+  if (daten.nummer !== undefined) d.nummer = String(daten.nummer).trim();
+  if (daten.stichwort !== undefined) d.stichwort = String(daten.stichwort).trim();
+  if (daten.langtext !== undefined) d.langtext = String(daten.langtext);
+  if (daten.einheit !== undefined) d.einheit = String(daten.einheit).trim();
+  if (daten.menge !== undefined) d.menge = endlicheZahl(daten.menge, "Menge");
+  if (daten.epLohn !== undefined) d.epLohn = endlicheZahl(daten.epLohn, "EP Lohn");
+  if (daten.epSonstiges !== undefined) {
+    d.epSonstiges = endlicheZahl(daten.epSonstiges, "EP Sonstiges");
+  }
+  return d;
+}
+
 export async function ntPositionAnlegen(
   lvId: string,
   nachtragId: string,
@@ -161,7 +196,11 @@ export async function ntPositionAnlegen(
     _max: { sortier: true },
   });
   await prisma.nachtragsPosition.create({
-    data: { nachtragId, ...daten, sortier: (max._max.sortier ?? 0) + 1 },
+    data: {
+      ...(ntPositionsDaten(daten) as NtPositionsDaten),
+      nachtragId,
+      sortier: (max._max.sortier ?? 0) + 1,
+    },
   });
   revalidatePath(ntPfad(lv.projektId, lvId));
 }
@@ -176,7 +215,7 @@ export async function ntPositionAendern(
   await offenerNachtrag(lvId, nachtragId);
   await prisma.nachtragsPosition.updateMany({
     where: { id: positionId, nachtragId },
-    data: daten,
+    data: ntPositionsDaten(daten),
   });
   revalidatePath(ntPfad(lv.projektId, lvId));
 }

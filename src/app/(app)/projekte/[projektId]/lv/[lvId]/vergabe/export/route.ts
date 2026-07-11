@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import ExcelJS from "exceljs";
-import { auth } from "@/auth";
+import { requireUser } from "@/lib/session";
 import { prisma } from "@/lib/prisma";
 
 const GRUEN = "FFD9F2D9";
@@ -10,16 +10,13 @@ export async function GET(
   _req: Request,
   { params }: { params: Promise<{ projektId: string; lvId: string }> }
 ) {
-  const session = await auth();
-  if (!session?.user?.tenantId) {
-    return NextResponse.json({ error: "Nicht angemeldet" }, { status: 401 });
-  }
+  const user = await requireUser();
 
   const { projektId, lvId } = await params;
   const lv = await prisma.lv.findFirst({
     where: {
       id: lvId,
-      projekt: { id: projektId, tenantId: session.user.tenantId },
+      projekt: { id: projektId, tenantId: user.tenantId },
     },
     include: {
       projekt: true,
@@ -80,6 +77,7 @@ export async function GET(
   // Gruppen rekursiv mit Positionen ausgeben
   const zaehlt = (art: string) => art !== "EVENTUAL" && art !== "ALTERNATIV";
   const summen = angebote.map(() => 0);
+  const fehlende = angebote.map(() => 0); // Positionen ohne Preis je Bieter
 
   const gruppenNach = (parentId: string | null) =>
     lv.gruppen.filter((g) => g.parentId === parentId);
@@ -117,7 +115,10 @@ export async function GET(
             fgColor: { argb: GRUEN },
           };
         }
-        if (zaehlt(p.art)) summen[i] += menge * ep;
+        if (zaehlt(p.art)) {
+          summen[i] += menge * ep;
+          if (!(ep > 0)) fehlende[i] += 1;
+        }
       });
       zeile.getCell(3).numFmt = "#,##0.000";
     }
@@ -131,9 +132,11 @@ export async function GET(
     schreibeGruppe(wurzel.id, "");
   }
 
-  // Summenzeile
+  // Summenzeile. Unvollständig ausgepreiste Angebote sind künstlich zu
+  // niedrig und werden daher nicht als günstigste hervorgehoben.
   blatt.addRow([]);
-  const minSumme = Math.min(...summen.filter((s) => s > 0));
+  const vollstaendige = summen.filter((s, i) => s > 0 && fehlende[i] === 0);
+  const minSumme = Math.min(...vollstaendige);
   const summenZeile = blatt.addRow([
     "",
     "Angebotssumme (netto)",
@@ -146,10 +149,20 @@ export async function GET(
     const zelle = summenZeile.getCell(5 + i);
     zelle.numFmt = "#,##0.00";
     zelle.border = { top: { style: "double" } };
-    if (s > 0 && s === minSumme) {
+    if (s > 0 && fehlende[i] === 0 && s === minSumme) {
       zelle.fill = { type: "pattern", pattern: "solid", fgColor: { argb: GRUEN } };
     }
   });
+  if (fehlende.some((f) => f > 0)) {
+    const hinweisZeile = blatt.addRow([
+      "",
+      "⚠ Unvollständige Angebote (Summe nicht vergleichbar)",
+      "",
+      "",
+      ...fehlende.map((f) => (f > 0 ? `${f} Pos. ohne Preis` : "")),
+    ]);
+    hinweisZeile.font = { italic: true, size: 9 };
+  }
 
   const puffer = await workbook.xlsx.writeBuffer();
   const dateiname = `Preisspiegel_${lv.projekt.nummer}_${lv.bezeichnung}`

@@ -91,10 +91,17 @@ export async function angebotspreisAendern(
   ep: number
 ) {
   const { lv } = await lvDesMandanten(lvId);
+  if (typeof ep !== "number" || !Number.isFinite(ep)) {
+    throw new Error("Ungültiger Einheitspreis");
+  }
   const angebot = await prisma.angebot.findFirst({
     where: { id: angebotId, lvId },
   });
   if (!angebot) throw new Error("Angebot nicht gefunden");
+  const position = await prisma.position.findFirst({
+    where: { id: positionId, lvId },
+  });
+  if (!position) throw new Error("Position nicht gefunden");
 
   await prisma.angebotsPosition.upsert({
     where: { angebotId_positionId: { angebotId, positionId } },
@@ -114,16 +121,19 @@ export async function angebotspreisAendern(
 /** Erteilt den Zuschlag an ein Angebot; ein zuvor erteilter Zuschlag im selben LV wird zurückgesetzt. */
 export async function zuschlagErteilen(lvId: string, angebotId: string) {
   const { lv } = await lvDesMandanten(lvId);
-  await prisma.$transaction([
-    prisma.angebot.updateMany({
-      where: { lvId, status: "ZUSCHLAG" },
+  await prisma.$transaction(async (tx) => {
+    await tx.angebot.updateMany({
+      where: { lvId, status: "ZUSCHLAG", id: { not: angebotId } },
       data: { status: "ABGEGEBEN" },
-    }),
-    prisma.angebot.update({
-      where: { id: angebotId },
+    });
+    // lvId in der Bedingung: der Zuschlag darf nur ein Angebot dieses
+    // (mandantengeprüften) LV treffen, nie ein fremdes per manipulierter ID.
+    const erteilt = await tx.angebot.updateMany({
+      where: { id: angebotId, lvId },
       data: { status: "ZUSCHLAG" },
-    }),
-  ]);
+    });
+    if (erteilt.count === 0) throw new Error("Angebot nicht gefunden");
+  });
   revalidatePath(vergabePfad(lv.projektId, lvId));
 }
 
@@ -155,6 +165,9 @@ export async function vertragsLvErzeugen(lvId: string, angebotId: string) {
     include: { bieter: true, preise: true },
   });
   if (!angebot) throw new Error("Angebot nicht gefunden");
+  if (angebot.status !== "ZUSCHLAG") {
+    throw new Error("Nur das bezuschlagte Angebot kann zum Vertrags-LV werden");
+  }
 
   const preisJePosition = new Map(angebot.preise.map((p) => [p.positionId, Number(p.ep)]));
 
@@ -166,6 +179,12 @@ export async function vertragsLvErzeugen(lvId: string, angebotId: string) {
         art: "VERTRAGS_LV",
         waehrung: lv.waehrung,
         ustSatz: lv.ustSatz,
+        // Abrechnungskonditionen mitnehmen – das Vertrags-LV ist das LV,
+        // das später abgerechnet wird.
+        deckungsruecklass: lv.deckungsruecklass,
+        haftruecklass: lv.haftruecklass,
+        skonto: lv.skonto,
+        skontoTage: lv.skontoTage,
       },
     });
 

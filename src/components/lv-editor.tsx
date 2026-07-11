@@ -309,11 +309,17 @@ function PositionZeile({
           </button>
           {!readonly && (
             <button
-              title="Position löschen"
+              title="Position löschen (nicht möglich bei Aufmaß oder beauftragtem Nachtrag)"
               className="text-slate-300 hover:text-red-600"
               onClick={() =>
                 startTransition(async () => {
-                  await positionLoeschen(lvId, pos.id);
+                  try {
+                    await positionLoeschen(lvId, pos.id);
+                  } catch {
+                    window.alert(
+                      "Die Position kann nicht gelöscht werden – an ihr hängen Aufmaßzeilen oder sie stammt aus einem beauftragten Nachtrag."
+                    );
+                  }
                 })
               }
             >
@@ -617,11 +623,19 @@ export function LvEditor({
                   startTransition(async () => {
                     const betroffen = new Set<string>();
                     sammleGruppenIds(auswahl, betroffen);
-                    await gruppeLoeschen(lvId, auswahl.id);
+                    try {
+                      await gruppeLoeschen(lvId, auswahl.id);
+                    } catch {
+                      window.alert(
+                        "Die Gruppe kann nicht gelöscht werden – sie enthält Positionen mit Aufmaß oder aus einem beauftragten Nachtrag."
+                      );
+                      return;
+                    }
                     if (auswahlId && betroffen.has(auswahlId)) setAuswahlId(null);
                   })
                 }
                 className="flex-1 rounded border border-red-200 px-2 py-1 text-xs text-red-600 hover:bg-red-50"
+                title="Nicht möglich, wenn Positionen Aufmaß tragen oder aus einem beauftragten Nachtrag stammen"
               >
                 Ausgewählte Gruppe löschen
               </button>

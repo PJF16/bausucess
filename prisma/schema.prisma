@@ -163,6 +163,8 @@ model Position {
   ansaetze      KalkAnsatz[]
   angebotspreise AngebotsPosition[]
   aufmasszeilen Aufmasszeile[]
+  rechnungsPositionen RechnungsPosition[]
+  nachtragsPositionen NachtragsPosition[]
 
   @@index([lvId])
   @@index([gruppeId])
@@ -318,8 +320,15 @@ enum RechnungStatus {
   BEZAHLT
 }
 
-// Rechnung: rechnet die ihr zugeordneten Aufmaßzeilen ab (inkrementell –
-// jede Zeile gehört zu genau einer Rechnung).
+// Rechnung: rechnet die ihr zugeordneten Aufmaßzeilen ab. Teilrechnungen
+// sind inkrementell (jede Zeile gehört zu genau einer Rechnung), die
+// Schlussrechnung rechnet kumulativ die Gesamtleistung ab und zieht die
+// bereits verrechneten Teilrechnungen ab (ÖNORM B 2110: Deckungsrücklass
+// wird damit aufgelöst, Haftrücklass auf die Gesamtsumme einbehalten).
+//
+// Beim Legen (ENTWURF → GELEGT) werden Beträge und Konditionen als
+// Snapshot eingefroren, damit sich gelegte Rechnungen nicht rückwirkend
+// ändern, wenn EPs oder LV-Konditionen später bearbeitet werden.
 model Rechnung {
   id     String         @id @default(cuid())
   lvId   String
@@ -328,10 +337,37 @@ model Rechnung {
   status RechnungStatus @default(ENTWURF)
   datum  DateTime       @default(now())
 
-  lv     Lv             @relation(fields: [lvId], references: [id], onDelete: Cascade)
-  zeilen Aufmasszeile[]
+  // Snapshot ab Legung (null solange ENTWURF):
+  gelegtAm          DateTime?
+  netto             Decimal?  @db.Decimal(14, 2) // TR: Leistungssumme der Rechnung; SR: kumulierte Gesamtleistung
+  ruecklassSatz     Decimal?  @db.Decimal(5, 2)
+  ustSatz           Decimal?  @db.Decimal(5, 2)
+  skontoSatz        Decimal?  @db.Decimal(5, 2)
+  skontoTage        Int?
+  bereitsVerrechnet Decimal?  @db.Decimal(14, 2) // nur SR: Summe der Zahlbeträge der Teilrechnungen
+  zahlbetrag        Decimal?  @db.Decimal(14, 2) // Brutto-Zahlbetrag laut Legung
+
+  lv         Lv                  @relation(fields: [lvId], references: [id], onDelete: Cascade)
+  zeilen     Aufmasszeile[]
+  positionen RechnungsPosition[]
 
   @@unique([lvId, nummer])
+}
+
+// EP-Snapshot je Position zum Zeitpunkt der Legung. NoAction (statt Cascade)
+// auf die Position: eine Position, die auf einer gelegten Rechnung steht,
+// kann nicht gelöscht werden, solange die Rechnung existiert.
+model RechnungsPosition {
+  id         String  @id @default(cuid())
+  rechnungId String
+  positionId String
+  ep         Decimal @db.Decimal(14, 2)
+
+  rechnung Rechnung @relation(fields: [rechnungId], references: [id], onDelete: Cascade)
+  position Position @relation(fields: [positionId], references: [id], onDelete: NoAction)
+
+  @@unique([rechnungId, positionId])
+  @@index([positionId])
 }
 
 // ── Nachträge (Zusatz-/Minderleistungen) ─────────────────────────────
@@ -373,7 +409,12 @@ model NachtragsPosition {
   epSonstiges Decimal @default(0) @db.Decimal(14, 2)
   sortier     Int     @default(0)
 
+  // Verknüpfung zur übernommenen LV-Position. NoAction: die LV-Position
+  // eines beauftragten Nachtrags kann nicht einzeln gelöscht werden
+  // (beim Löschen des ganzen LV werden Nachtrag und Position gemeinsam
+  // entfernt, dann greift die Prüfung nicht).
   uebernommenePositionId String?
+  uebernommenePosition   Position? @relation(fields: [uebernommenePositionId], references: [id], onDelete: NoAction)
 
   nachtrag Nachtrag @relation(fields: [nachtragId], references: [id], onDelete: Cascade)
 

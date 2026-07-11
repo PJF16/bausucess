@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { auth } from "@/auth";
+import { requireUser } from "@/lib/session";
 import { prisma } from "@/lib/prisma";
 import { lvZuOnlvXml, type OnlvGruppe } from "@/lib/onlv";
 
@@ -7,16 +7,13 @@ export async function GET(
   _req: Request,
   { params }: { params: Promise<{ projektId: string; lvId: string }> }
 ) {
-  const session = await auth();
-  if (!session?.user?.tenantId) {
-    return NextResponse.json({ error: "Nicht angemeldet" }, { status: 401 });
-  }
+  const user = await requireUser();
 
   const { projektId, lvId } = await params;
   const lv = await prisma.lv.findFirst({
     where: {
       id: lvId,
-      projekt: { id: projektId, tenantId: session.user.tenantId },
+      projekt: { id: projektId, tenantId: user.tenantId },
     },
     include: {
       projekt: true,

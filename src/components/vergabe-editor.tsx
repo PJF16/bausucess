@@ -72,21 +72,25 @@ function VergabeKopf({
   angebote,
   verfuegbareBieter,
   summen,
+  fehlend,
   readonly,
 }: {
   lvId: string;
   angebote: VergabeAngebot[];
   verfuegbareBieter: { id: string; firma: string }[];
   summen: Map<string, number>;
+  fehlend: Map<string, number>;
   readonly: boolean;
 }) {
   const [pending, startTransition] = useTransition();
   const [auswahl, setAuswahl] = useState("");
 
+  // Nur vollständig ausgepreiste Angebote kommen für „günstigstes" infrage
   const guenstigsteId = useMemo(() => {
     let besteId: string | null = null;
     let besterWert = Infinity;
     for (const a of angebote) {
+      if ((fehlend.get(a.id) ?? 0) > 0) continue;
       const summe = summen.get(a.id) ?? 0;
       if (summe > 0 && summe < besterWert) {
         besterWert = summe;
@@ -94,7 +98,7 @@ function VergabeKopf({
       }
     }
     return besteId;
-  }, [angebote, summen]);
+  }, [angebote, summen, fehlend]);
 
   const zuschlag = angebote.find((a) => a.status === "ZUSCHLAG");
 
@@ -111,7 +115,15 @@ function VergabeKopf({
           >
             <span className="font-medium">{a.firma}</span>
             {a.id === guenstigsteId && a.status !== "ZUSCHLAG" && (
-              <span title="Günstigstes Angebot">★</span>
+              <span title="Günstigstes vollständiges Angebot">★</span>
+            )}
+            {(fehlend.get(a.id) ?? 0) > 0 && (
+              <span
+                className="rounded bg-amber-100 px-1 text-[10px] font-semibold text-amber-800"
+                title={`${fehlend.get(a.id)} Positionen ohne Preis – Angebotssumme nicht vergleichbar`}
+              >
+                ⚠ {fehlend.get(a.id)} o. Preis
+              </span>
             )}
             <span className="opacity-70">{statusLabel[a.status]}</span>
             {!readonly &&
@@ -327,6 +339,21 @@ export function VergabeEditor({
     return map;
   }, [angebote, positionen]);
 
+  // Unvollständig ausgepreiste Angebote: ihre Summe ist künstlich zu niedrig
+  // und darf nicht als „günstigstes Angebot" gewertet werden.
+  const fehlendJeAngebot = useMemo(() => {
+    const map = new Map<string, number>();
+    for (const a of angebote) {
+      let fehlt = 0;
+      for (const p of positionen) {
+        if (!positionZaehlt(p.art)) continue;
+        if (!((a.preise[p.id] ?? 0) > 0)) fehlt++;
+      }
+      map.set(a.id, fehlt);
+    }
+    return map;
+  }, [angebote, positionen]);
+
   // Je Position: günstigster (nicht-null) Preis über alle Bieter, für Hervorhebung
   const minJePosition = useMemo(() => {
     const map = new Map<string, number>();
@@ -348,6 +375,7 @@ export function VergabeEditor({
         angebote={angebote}
         verfuegbareBieter={verfuegbareBieter}
         summen={summen}
+        fehlend={fehlendJeAngebot}
         readonly={!darfBearbeiten}
       />
 

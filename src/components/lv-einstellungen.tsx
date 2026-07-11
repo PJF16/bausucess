@@ -28,7 +28,13 @@ export function LvEinstellungen({ lv }: { lv: LvEinstellungenDaten }) {
     );
     if (!ok) return;
     startTransition(async () => {
-      await lvLoeschen(lv.projektId, lv.lvId);
+      try {
+        await lvLoeschen(lv.projektId, lv.lvId);
+      } catch {
+        window.alert(
+          "Das LV enthält gelegte Rechnungen und kann nicht gelöscht werden."
+        );
+      }
     });
   };
 

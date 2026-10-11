@@ -51,15 +51,15 @@ model Membership {
 // ── Projekte & Leistungsverzeichnisse ───────────────────────────────
 
 model Projekt {
-  id          String   @id @default(cuid())
-  tenantId    String
-  nummer      String
-  bezeichnung String
+  id           String        @id @default(cuid())
+  tenantId     String
+  nummer       String
+  bezeichnung  String
   auftraggeber String?
-  ort         String?
-  status      ProjektStatus @default(AKTIV)
-  createdAt   DateTime @default(now())
-  updatedAt   DateTime @updatedAt
+  ort          String?
+  status       ProjektStatus @default(AKTIV)
+  createdAt    DateTime      @default(now())
+  updatedAt    DateTime      @updatedAt
 
   tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
   lvs    Lv[]
@@ -83,30 +83,32 @@ enum LvArt {
 }
 
 model Lv {
-  id          String   @id @default(cuid())
-  projektId   String
-  bezeichnung String
-  art         LvArt    @default(AUSSCHREIBUNGS_LV)
-  waehrung    String   @default("EUR")
-  ustSatz     Decimal  @default(20) @db.Decimal(5, 2)
+  id                String   @id @default(cuid())
+  projektId         String
+  bezeichnung       String
+  art               LvArt    @default(AUSSCHREIBUNGS_LV)
+  waehrung          String   @default("EUR")
+  ustSatz           Decimal  @default(20) @db.Decimal(5, 2)
   // Abrechnungskonditionen (ÖNORM B 2110-Praxis):
   // Deckungsrücklass wird bei Teilrechnungen einbehalten,
   // Haftrücklass bei der Schlussrechnung (Gewährleistungssicherheit).
-  deckungsruecklass Decimal @default(0) @db.Decimal(5, 2) // %
-  haftruecklass     Decimal @default(0) @db.Decimal(5, 2) // %
-  skonto            Decimal @default(0) @db.Decimal(5, 2) // %
-  skontoTage        Int     @default(0)
-  createdAt   DateTime @default(now())
-  updatedAt   DateTime @updatedAt
+  deckungsruecklass Decimal  @default(0) @db.Decimal(5, 2) // %
+  haftruecklass     Decimal  @default(0) @db.Decimal(5, 2) // %
+  skonto            Decimal  @default(0) @db.Decimal(5, 2) // %
+  skontoTage        Int      @default(0)
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
 
-  projekt   Projekt     @relation(fields: [projektId], references: [id], onDelete: Cascade)
-  gruppen   LvGruppe[]
-  positionen Position[]
-  kalkulation Kalkulation?
-  angebote  Angebot[]
+  projekt         Projekt        @relation(fields: [projektId], references: [id], onDelete: Cascade)
+  gruppen         LvGruppe[]
+  positionen      Position[]
+  kalkulation     Kalkulation?
+  angebote        Angebot[]      @relation("AusschreibungAngebote")
   aufmassblaetter Aufmassblatt[]
-  rechnungen Rechnung[]
-  nachtraege Nachtrag[]
+  rechnungen      Rechnung[]
+  nachtraege      Nachtrag[]
+  angebotId       String?        @unique
+  angebot         Angebot?       @relation("VertragsAngebot", fields: [angebotId], references: [id], onDelete: Restrict)
 }
 
 // Hierarchie nach ÖNORM: HG (Hauptgruppe), OG (Obergruppe),
@@ -127,20 +129,20 @@ model LvGruppe {
   bezeichnung String
   sortier     Int          @default(0)
 
-  lv       Lv         @relation(fields: [lvId], references: [id], onDelete: Cascade)
-  parent   LvGruppe?  @relation("GruppenHierarchie", fields: [parentId], references: [id], onDelete: Cascade)
-  kinder   LvGruppe[] @relation("GruppenHierarchie")
+  lv         Lv         @relation(fields: [lvId], references: [id], onDelete: Cascade)
+  parent     LvGruppe?  @relation("GruppenHierarchie", fields: [parentId], references: [id], onDelete: Cascade)
+  kinder     LvGruppe[] @relation("GruppenHierarchie")
   positionen Position[]
 
   @@index([lvId, parentId])
 }
 
 enum PositionsArt {
-  NORMAL          // Normalposition
-  WESENTLICH      // Wesentliche Position
-  EVENTUAL        // Eventualposition
-  ALTERNATIV      // Alternativposition (Wahlposition)
-  REGIE           // Regieposition
+  NORMAL // Normalposition
+  WESENTLICH // Wesentliche Position
+  EVENTUAL // Eventualposition
+  ALTERNATIV // Alternativposition (Wahlposition)
+  REGIE // Regieposition
 }
 
 model Position {
@@ -158,11 +160,11 @@ model Position {
   epSonstiges Decimal      @default(0) @db.Decimal(14, 2)
   sortier     Int          @default(0)
 
-  lv            Lv                 @relation(fields: [lvId], references: [id], onDelete: Cascade)
-  gruppe        LvGruppe           @relation(fields: [gruppeId], references: [id], onDelete: Cascade)
-  ansaetze      KalkAnsatz[]
-  angebotspreise AngebotsPosition[]
-  aufmasszeilen Aufmasszeile[]
+  lv                  Lv                  @relation(fields: [lvId], references: [id], onDelete: Cascade)
+  gruppe              LvGruppe            @relation(fields: [gruppeId], references: [id], onDelete: Cascade)
+  ansaetze            KalkAnsatz[]
+  angebotspreise      AngebotsPosition[]
+  aufmasszeilen       Aufmasszeile[]
   rechnungsPositionen RechnungsPosition[]
   nachtragsPositionen NachtragsPosition[]
 
@@ -175,22 +177,22 @@ model Position {
 // Kalkulationsblatt je LV: Mittellohnkosten + Gesamtzuschläge je Kostenart.
 // Mittellohnpreis = Mittellohnkosten × (1 + zuschlagLohn/100)
 model Kalkulation {
-  id               String   @id @default(cuid())
-  lvId             String   @unique
-  mittellohnkosten Decimal  @default(40) @db.Decimal(10, 2) // €/h
-  zuschlagLohn     Decimal  @default(85) @db.Decimal(6, 2) // % (GGK, BGK, Wagnis & Gewinn)
-  zuschlagMaterial Decimal  @default(12) @db.Decimal(6, 2) // %
-  zuschlagGeraet   Decimal  @default(15) @db.Decimal(6, 2) // %
-  zuschlagFremd    Decimal  @default(8) @db.Decimal(6, 2) // %
-  zuschlagSonstiges Decimal @default(12) @db.Decimal(6, 2) // %
-  updatedAt        DateTime @updatedAt
+  id                String   @id @default(cuid())
+  lvId              String   @unique
+  mittellohnkosten  Decimal  @default(40) @db.Decimal(10, 2) // €/h
+  zuschlagLohn      Decimal  @default(85) @db.Decimal(6, 2) // % (GGK, BGK, Wagnis & Gewinn)
+  zuschlagMaterial  Decimal  @default(12) @db.Decimal(6, 2) // %
+  zuschlagGeraet    Decimal  @default(15) @db.Decimal(6, 2) // %
+  zuschlagFremd     Decimal  @default(8) @db.Decimal(6, 2) // %
+  zuschlagSonstiges Decimal  @default(12) @db.Decimal(6, 2) // %
+  updatedAt         DateTime @updatedAt
 
   lv       Lv           @relation(fields: [lvId], references: [id], onDelete: Cascade)
   ansaetze KalkAnsatz[]
 }
 
 enum AnsatzArt {
-  LOHN          // Stunden × Mittellohnpreis
+  LOHN // Stunden × Mittellohnpreis
   MATERIAL
   GERAET
   FREMDLEISTUNG
@@ -219,14 +221,15 @@ model KalkAnsatz {
 
 // Bieter sind mandantenweit gepflegt und über Projekte hinweg wiederverwendbar.
 model Bieter {
-  id              String   @id @default(cuid())
+  id              String    @id @default(cuid())
   tenantId        String
   firma           String
   ansprechpartner String?
   email           String?
   telefon         String?
   adresse         String?
-  createdAt       DateTime @default(now())
+  createdAt       DateTime  @default(now())
+  archiviertAm    DateTime?
 
   tenant   Tenant    @relation(fields: [tenantId], references: [id], onDelete: Cascade)
   angebote Angebot[]
@@ -248,9 +251,10 @@ model Angebot {
   notiz     String        @default("")
   createdAt DateTime      @default(now())
 
-  lv     Lv                 @relation(fields: [lvId], references: [id], onDelete: Cascade)
-  bieter Bieter             @relation(fields: [bieterId], references: [id], onDelete: Cascade)
-  preise AngebotsPosition[]
+  lv         Lv                 @relation("AusschreibungAngebote", fields: [lvId], references: [id], onDelete: Cascade)
+  bieter     Bieter             @relation(fields: [bieterId], references: [id], onDelete: Restrict)
+  preise     AngebotsPosition[]
+  vertragsLv Lv?                @relation("VertragsAngebot")
 
   @@unique([lvId, bieterId])
 }
@@ -318,6 +322,7 @@ enum RechnungStatus {
   ENTWURF
   GELEGT
   BEZAHLT
+  STORNIERT
 }
 
 // Rechnung: rechnet die ihr zugeordneten Aufmaßzeilen ab. Teilrechnungen
@@ -338,18 +343,25 @@ model Rechnung {
   datum  DateTime       @default(now())
 
   // Snapshot ab Legung (null solange ENTWURF):
-  gelegtAm          DateTime?
-  netto             Decimal?  @db.Decimal(14, 2) // TR: Leistungssumme der Rechnung; SR: kumulierte Gesamtleistung
-  ruecklassSatz     Decimal?  @db.Decimal(5, 2)
-  ustSatz           Decimal?  @db.Decimal(5, 2)
-  skontoSatz        Decimal?  @db.Decimal(5, 2)
-  skontoTage        Int?
-  bereitsVerrechnet Decimal?  @db.Decimal(14, 2) // nur SR: Summe der Zahlbeträge der Teilrechnungen
-  zahlbetrag        Decimal?  @db.Decimal(14, 2) // Brutto-Zahlbetrag laut Legung
+  gelegtAm                   DateTime?
+  netto                      Decimal?  @db.Decimal(14, 2) // TR: Leistungssumme der Rechnung; SR: kumulierte Gesamtleistung
+  ruecklassSatz              Decimal?  @db.Decimal(5, 2)
+  ustSatz                    Decimal?  @db.Decimal(5, 2)
+  skontoSatz                 Decimal?  @db.Decimal(5, 2)
+  skontoTage                 Int?
+  bereitsVerrechnet          Decimal?  @db.Decimal(14, 2) // nur SR: Summe der Zahlbeträge der Teilrechnungen
+  zahlbetrag                 Decimal?  @db.Decimal(14, 2) // Brutto-Zahlbetrag laut Legung
+  storniertAm                DateTime?
+  stornoGrund                String?
+  snapshotProjektNummer      String?
+  snapshotProjektBezeichnung String?
+  snapshotAuftraggeber       String?
+  snapshotLvBezeichnung      String?
 
-  lv         Lv                  @relation(fields: [lvId], references: [id], onDelete: Cascade)
-  zeilen     Aufmasszeile[]
-  positionen RechnungsPosition[]
+  lv             Lv                  @relation(fields: [lvId], references: [id], onDelete: Cascade)
+  zeilen         Aufmasszeile[]
+  positionen     RechnungsPosition[]
+  snapshotZeilen RechnungsZeile[]
 
   @@unique([lvId, nummer])
 }
@@ -362,12 +374,42 @@ model RechnungsPosition {
   rechnungId String
   positionId String
   ep         Decimal @db.Decimal(14, 2)
+  nummer     String  @default("")
+  stichwort  String  @default("")
+  langtext   String  @default("")
+  einheit    String  @default("")
+  menge      Decimal @default(0) @db.Decimal(14, 3)
 
   rechnung Rechnung @relation(fields: [rechnungId], references: [id], onDelete: Cascade)
   position Position @relation(fields: [positionId], references: [id], onDelete: NoAction)
 
   @@unique([rechnungId, positionId])
   @@index([positionId])
+}
+
+// Unveränderliche Zeilenkopie des Druckbelegs, unabhängig von späteren
+// Änderungen an Aufmaß und LV. Die Referenz auf die Ursprungszeile ist Provenienz.
+model RechnungsZeile {
+  id                   String  @id @default(cuid())
+  rechnungId           String
+  sourceZeileId        String
+  positionId           String
+  sourceRechnungNummer Int?
+  blattNummer          Int
+  blattBezeichnung     String
+  positionsNummer      String
+  positionStichwort    String
+  positionLangtext     String  @default("")
+  einheit              String
+  zeilenBezeichnung    String
+  ansatz               String
+  menge                Decimal @db.Decimal(14, 3)
+  ep                   Decimal @db.Decimal(14, 2)
+  sortier              Int     @default(0)
+
+  rechnung Rechnung @relation(fields: [rechnungId], references: [id], onDelete: Cascade)
+
+  @@index([rechnungId, sortier])
 }
 
 // ── Nachträge (Zusatz-/Minderleistungen) ─────────────────────────────

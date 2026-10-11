@@ -1,6 +1,6 @@
 import { prisma } from "@/lib/prisma";
 import { requireUser } from "@/lib/session";
-import { bieterAnlegen, bieterLoeschen } from "@/lib/actions/vergabe";
+import { bieterAnlegen, bieterArchivStatusSetzen, bieterLoeschen } from "@/lib/actions/vergabe";
 
 export default async function BieterPage() {
   const user = await requireUser();
@@ -92,22 +92,28 @@ export default async function BieterPage() {
             )}
             {bieter.map((b) => (
               <tr key={b.id} className="border-t border-slate-100 hover:bg-blue-50">
-                <td className="px-4 py-2 font-medium">{b.firma}</td>
+                <td className="px-4 py-2 font-medium">
+                  {b.firma}
+                  {b.archiviertAm && <span className="ml-2 rounded bg-slate-100 px-1.5 py-0.5 text-[10px] font-medium text-slate-500">Archiviert</span>}
+                </td>
                 <td className="px-4 py-2 text-slate-500">{b.ansprechpartner ?? "–"}</td>
                 <td className="px-4 py-2 text-slate-500">{b.email ?? "–"}</td>
                 <td className="px-4 py-2 text-slate-500">{b.telefon ?? "–"}</td>
                 <td className="px-4 py-2 text-right">{b._count.angebote}</td>
                 <td className="px-4 py-2 text-right">
-                  {user.rolle !== "LESER" && (
-                    <form action={bieterLoeschen.bind(null, b.id)}>
-                      <button
-                        className="text-xs text-slate-400 hover:text-red-600"
-                        title="Bieter löschen"
-                      >
-                        Löschen
+                  {user.rolle !== "LESER" && <div className="flex items-center justify-end gap-3">
+                    <form action={bieterArchivStatusSetzen.bind(null, b.id, !b.archiviertAm)}>
+                      <button className="text-xs text-blue-700 hover:underline">
+                        {b.archiviertAm ? "Reaktivieren" : "Archivieren"}
                       </button>
                     </form>
-                  )}
+                    {b._count.angebote === 0 && (
+                      <form action={bieterLoeschen.bind(null, b.id)}>
+                        <button className="text-xs text-slate-400 hover:text-red-600" title="Bieter ohne Angebote löschen">Löschen</button>
+                      </form>
+                    )}
+                    {b._count.angebote > 0 && <span className="text-xs text-slate-400" title="Angebots- und Zuschlagshistorie bleibt erhalten">Historie geschützt</span>}
+                  </div>}
                 </td>
               </tr>
             ))}

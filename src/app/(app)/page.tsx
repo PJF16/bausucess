@@ -103,7 +103,9 @@ export default async function DashboardPage() {
                 <td className="px-4 py-2 text-slate-500">{p.auftraggeber ?? "–"}</td>
                 <td className="px-4 py-2 text-slate-500">{p.ort ?? "–"}</td>
                 <td className="px-4 py-2 text-right">{p._count.lvs}</td>
-                <td className="px-4 py-2 text-xs text-slate-500">{p.status}</td>
+                <td className="px-4 py-2 text-xs text-slate-500">
+                  {p.status === "AKTIV" ? "Aktiv" : p.status === "ABGESCHLOSSEN" ? "Abgeschlossen" : "Archiviert"}
+                </td>
               </tr>
             ))}
           </tbody>

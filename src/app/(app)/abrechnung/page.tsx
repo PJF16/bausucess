@@ -10,7 +10,7 @@ export default async function AbrechnungUebersichtPage() {
     orderBy: [{ projekt: { nummer: "asc" } }, { createdAt: "desc" }],
     include: {
       projekt: { select: { id: true, nummer: true, bezeichnung: true } },
-      rechnungen: { select: { id: true } },
+      rechnungen: { select: { id: true, art: true, status: true, netto: true } },
       aufmassblaetter: {
         include: {
           zeilen: {
@@ -41,8 +41,8 @@ export default async function AbrechnungUebersichtPage() {
               <th className="px-4 py-2">Leistungsverzeichnis</th>
               <th className="px-4 py-2">Art</th>
               <th className="px-4 py-2 text-right">Offenes Aufmaß</th>
-              <th className="px-4 py-2 text-right">Abgerechnet netto</th>
-              <th className="px-4 py-2 text-right">Rechnungen</th>
+              <th className="px-4 py-2 text-right">Aktiv abgerechnet netto</th>
+              <th className="px-4 py-2 text-right">Aktive Rechnungen</th>
             </tr>
           </thead>
           <tbody>
@@ -59,9 +59,11 @@ export default async function AbrechnungUebersichtPage() {
                 Number(z.menge) *
                 (Number(z.position.epLohn) + Number(z.position.epSonstiges));
               const offen = zeilen.filter((z) => z.rechnungId === null);
-              const abgerechnet = zeilen
-                .filter((z) => z.rechnungId !== null)
-                .reduce((acc, z) => acc + betrag(z), 0);
+              const aktiveRechnungen = lv.rechnungen.filter((r) => r.status === "GELEGT" || r.status === "BEZAHLT");
+              const aktiveSchlussrechnung = aktiveRechnungen.find((r) => r.art === "SCHLUSSRECHNUNG");
+              const abgerechnet = aktiveSchlussrechnung
+                ? Number(aktiveSchlussrechnung.netto ?? 0)
+                : aktiveRechnungen.reduce((acc, r) => acc + Number(r.netto ?? 0), 0);
               const offenBetrag = offen.reduce((acc, z) => acc + betrag(z), 0);
               return (
                 <tr key={lv.id} className="border-t border-slate-100 hover:bg-blue-50">
@@ -92,7 +94,7 @@ export default async function AbrechnungUebersichtPage() {
                   <td className="px-4 py-2 text-right font-mono text-xs">
                     {abgerechnet > 0 ? euro.format(abgerechnet) : "–"}
                   </td>
-                  <td className="px-4 py-2 text-right">{lv.rechnungen.length}</td>
+                  <td className="px-4 py-2 text-right">{aktiveRechnungen.length}</td>
                 </tr>
               );
             })}

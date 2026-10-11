@@ -93,21 +93,26 @@ export async function zeileAnlegen(
     where: { id: positionId, lvId },
   });
   if (!blatt || !position) throw new Error("Blatt oder Position nicht gefunden");
-
-  const max = await prisma.aufmasszeile.aggregate({
-    where: { blattId },
-    _max: { sortier: true },
-  });
-  await prisma.aufmasszeile.create({
-    data: {
-      blattId,
-      positionId,
-      bezeichnung: daten.bezeichnung.trim(),
-      ansatz: daten.ansatz.trim(),
-      menge: effektiveMenge(daten),
-      sortier: (max._max.sortier ?? 0) + 1,
-    },
-  });
+  await prisma.$transaction(async (tx) => {
+    const offeneSchlussrechnung = await tx.rechnung.findFirst({
+      where: { lvId, art: "SCHLUSSRECHNUNG", status: "ENTWURF" },
+      select: { id: true },
+    });
+    if (offeneSchlussrechnung) {
+      throw new Error("Während eines Schlussrechnungsentwurfs können keine neuen Aufmaßzeilen angelegt werden");
+    }
+    const max = await tx.aufmasszeile.aggregate({ where: { blattId }, _max: { sortier: true } });
+    await tx.aufmasszeile.create({
+      data: {
+        blattId,
+        positionId,
+        bezeichnung: daten.bezeichnung.trim(),
+        ansatz: daten.ansatz.trim(),
+        menge: effektiveMenge(daten),
+        sortier: (max._max.sortier ?? 0) + 1,
+      },
+    });
+  }, { isolationLevel: "Serializable" });
   revalidatePath(abrechnungPfad(lv.projektId, lvId));
 }
 
@@ -156,7 +161,7 @@ export async function rechnungErstellen(lvId: string, art: RechnungArt) {
 
   const rechnungId = await prisma.$transaction(async (tx) => {
     const schlussrechnungen = await tx.rechnung.count({
-      where: { lvId, art: "SCHLUSSRECHNUNG" },
+      where: { lvId, art: "SCHLUSSRECHNUNG", status: { not: "STORNIERT" } },
     });
     if (schlussrechnungen > 0) {
       throw new Error(
@@ -204,7 +209,7 @@ export async function rechnungErstellen(lvId: string, art: RechnungArt) {
       throw new Error("Keine offenen Aufmaßzeilen vorhanden");
     }
     return rechnung.id;
-  });
+  }, { isolationLevel: "Serializable" });
 
   revalidatePath(abrechnungPfad(lv.projektId, lvId));
   redirect(`${abrechnungPfad(lv.projektId, lvId)}/rechnungen/${rechnungId}`);
@@ -220,7 +225,7 @@ async function rechnungLegen(lvId: string, rechnungId: string) {
   await prisma.$transaction(async (tx) => {
     const rechnung = await tx.rechnung.findFirst({
       where: { id: rechnungId, lvId },
-      include: { lv: true, zeilen: true },
+      include: { lv: true, zeilen: { include: { blatt: true } } },
     });
     if (!rechnung) throw new Error("Rechnung nicht gefunden");
     if (rechnung.status !== "ENTWURF") {
@@ -230,8 +235,15 @@ async function rechnungLegen(lvId: string, rechnungId: string) {
     let basisZeilen = rechnung.zeilen;
     let bereitsVerrechnet = 0;
     if (rechnung.art === "SCHLUSSRECHNUNG") {
+      const offeneZeilen = await tx.aufmasszeile.count({
+        where: { blatt: { lvId }, rechnungId: null },
+      });
+      if (offeneZeilen > 0) {
+        throw new Error("Schlussrechnung kann nicht gelegt werden: Es gibt noch offene Aufmaßzeilen. Löschen Sie den Schlussrechnungsentwurf, rechnen Sie die offenen Zeilen in einer Teilrechnung ab und erstellen Sie die Schlussrechnung anschließend erneut.");
+      }
       basisZeilen = await tx.aufmasszeile.findMany({
         where: { blatt: { lvId }, rechnungId: { not: null } },
+        include: { blatt: true },
       });
       const andere = await tx.rechnung.findMany({
         where: { lvId, id: { not: rechnung.id } },
@@ -242,7 +254,7 @@ async function rechnungLegen(lvId: string, rechnungId: string) {
         );
       }
       bereitsVerrechnet = andere.reduce(
-        (acc, r) => acc + Number(r.zahlbetrag ?? 0),
+        (acc, r) => acc + (r.status === "STORNIERT" ? 0 : Number(r.zahlbetrag ?? 0)),
         0
       );
     }
@@ -257,7 +269,7 @@ async function rechnungLegen(lvId: string, rechnungId: string) {
     }
     const positionen = await tx.position.findMany({
       where: { id: { in: Array.from(mengeJePosition.keys()) } },
-      select: { id: true, epLohn: true, epSonstiges: true },
+      select: { id: true, nummer: true, stichwort: true, langtext: true, einheit: true, epLohn: true, epSonstiges: true },
     });
     const epJePosition = new Map(
       positionen.map((p) => [p.id, runde2(Number(p.epLohn) + Number(p.epSonstiges))])
@@ -285,6 +297,7 @@ async function rechnungLegen(lvId: string, rechnungId: string) {
     );
 
     const jetzt = new Date();
+    const projekt = await tx.projekt.findUnique({ where: { id: rechnung.lv.projektId } });
     const gelegt = await tx.rechnung.updateMany({
       where: { id: rechnung.id, status: "ENTWURF" },
       data: {
@@ -298,16 +311,53 @@ async function rechnungLegen(lvId: string, rechnungId: string) {
         skontoTage: rechnung.lv.skontoTage,
         bereitsVerrechnet: summen.bereitsVerrechnet,
         zahlbetrag: summen.zahlbetrag,
+        snapshotProjektNummer: projekt?.nummer ?? "",
+        snapshotProjektBezeichnung: projekt?.bezeichnung ?? "",
+        snapshotAuftraggeber: projekt?.auftraggeber ?? "",
+        snapshotLvBezeichnung: rechnung.lv.bezeichnung,
       },
     });
     if (gelegt.count === 0) throw new Error("Rechnung wurde bereits gelegt");
 
     await tx.rechnungsPosition.createMany({
-      data: Array.from(mengeJePosition.keys()).map((positionId) => ({
+      data: Array.from(mengeJePosition.entries()).map(([positionId, menge]) => {
+        const position = positionen.find((p) => p.id === positionId)!;
+        return {
         rechnungId: rechnung.id,
         positionId,
         ep: epJePosition.get(positionId) ?? 0,
-      })),
+        nummer: position.nummer,
+        stichwort: position.stichwort,
+        langtext: position.langtext,
+        einheit: position.einheit,
+        menge,
+      }}),
+    });
+    const rechnungsNummern = new Map(
+      (await tx.rechnung.findMany({ where: { lvId }, select: { id: true, nummer: true } }))
+        .map((r) => [r.id, r.nummer])
+    );
+    await tx.rechnungsZeile.createMany({
+      data: basisZeilen.map((z) => {
+        const position = positionen.find((p) => p.id === z.positionId)!;
+        return {
+          rechnungId: rechnung.id,
+          sourceZeileId: z.id,
+          positionId: z.positionId,
+          sourceRechnungNummer: z.rechnungId ? rechnungsNummern.get(z.rechnungId) : undefined,
+          blattNummer: z.blatt.nummer,
+          blattBezeichnung: z.blatt.bezeichnung,
+          positionsNummer: position.nummer,
+          positionStichwort: position.stichwort,
+          positionLangtext: position.langtext,
+          einheit: position.einheit,
+          zeilenBezeichnung: z.bezeichnung,
+          ansatz: z.ansatz,
+          menge: z.menge,
+          ep: epJePosition.get(z.positionId) ?? 0,
+          sortier: z.sortier,
+        };
+      }),
     });
   });
 }
@@ -332,6 +382,39 @@ export async function rechnungStatusSetzen(
   } else {
     throw new Error("Dieser Statuswechsel ist nicht zulässig");
   }
+  revalidatePath(`${abrechnungPfad(lv.projektId, lvId)}/rechnungen/${rechnungId}`);
+  revalidatePath(abrechnungPfad(lv.projektId, lvId));
+}
+
+/** Storniert einen gelegten Beleg, erhält dessen Snapshot und gibt sein Aufmaß frei. */
+export async function rechnungStornieren(lvId: string, rechnungId: string, grund: string) {
+  const lv = await lvDesMandanten(lvId);
+  const stornoGrund = grund.trim();
+  if (stornoGrund.length < 3) throw new Error("Bitte geben Sie einen nachvollziehbaren Stornogrund an.");
+  await prisma.$transaction(async (tx) => {
+    const rechnung = await tx.rechnung.findFirst({ where: { id: rechnungId, lvId } });
+    if (!rechnung || rechnung.status !== "GELEGT") {
+      throw new Error(rechnung?.status === "BEZAHLT"
+        ? "Eine als bezahlt markierte Rechnung kann hier nicht storniert werden. Rückzahlung und Gutschrift werden noch nicht in der Abrechnung geführt."
+        : "Nur gelegte und noch nicht bezahlte Rechnungen können storniert werden.");
+    }
+    if (rechnung.art === "TEILRECHNUNG") {
+      const aktiveSchlussrechnung = await tx.rechnung.findFirst({
+        where: { lvId, art: "SCHLUSSRECHNUNG", status: { not: "STORNIERT" } },
+      });
+      if (aktiveSchlussrechnung) {
+        throw new Error("Stornieren Sie zuerst die Schlussrechnung, bevor Sie eine Teilrechnung korrigieren.");
+      }
+    }
+    const result = await tx.rechnung.updateMany({
+      where: { id: rechnungId, lvId, status: rechnung.status },
+      data: { status: "STORNIERT", storniertAm: new Date(), stornoGrund },
+    });
+    if (!result.count) throw new Error("Rechnungsstatus hat sich geändert. Bitte laden Sie die Seite neu.");
+    // Auch eine Schlussrechnung kann beim Erstellen noch offene Zeilen
+    // übernehmen. Nach ihrem Storno müssen diese wieder verfügbar sein.
+    await tx.aufmasszeile.updateMany({ where: { rechnungId }, data: { rechnungId: null } });
+  });
   revalidatePath(`${abrechnungPfad(lv.projektId, lvId)}/rechnungen/${rechnungId}`);
   revalidatePath(abrechnungPfad(lv.projektId, lvId));
 }

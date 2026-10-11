@@ -1,7 +1,7 @@
 "use client";
 
 import { useState, useTransition } from "react";
-import { projektAendern, projektLoeschen } from "@/lib/actions/projekte";
+import { projektAendernMitRueckmeldung, projektLoeschen } from "@/lib/actions/projekte";
 
 export interface ProjektDaten {
   id: string;
@@ -9,12 +9,27 @@ export interface ProjektDaten {
   bezeichnung: string;
   auftraggeber: string | null;
   ort: string | null;
+  status: "AKTIV" | "ABGESCHLOSSEN" | "ARCHIVIERT";
   anzahlLvs: number;
 }
 
 export function ProjektEinstellungen({ projekt }: { projekt: ProjektDaten }) {
   const [offen, setOffen] = useState(false);
+  const [fehler, setFehler] = useState("");
   const [pending, startTransition] = useTransition();
+
+  const speichern = (formData: FormData) => {
+    setFehler("");
+    startTransition(async () => {
+      try {
+        const ergebnis = await projektAendernMitRueckmeldung(projekt.id, formData);
+        if (ergebnis.error) setFehler(ergebnis.error);
+        else setOffen(false);
+      } catch (error) {
+        setFehler(error instanceof Error ? error.message : "Projekt konnte nicht gespeichert werden.");
+      }
+    });
+  };
 
   const loeschen = () => {
     const ok = window.confirm(
@@ -28,7 +43,7 @@ export function ProjektEinstellungen({ projekt }: { projekt: ProjektDaten }) {
         await projektLoeschen(projekt.id);
       } catch {
         window.alert(
-          "Das Projekt enthält gelegte Rechnungen und kann nicht gelöscht werden – bitte stattdessen den Status auf „Archiviert“ setzen."
+          "Das Projekt enthält möglicherweise gelegte Rechnungen oder Vertrags-LVs und kann nicht gelöscht werden. Bitte setzen Sie den Status auf „Archiviert“."
         );
       }
     });
@@ -59,10 +74,7 @@ export function ProjektEinstellungen({ projekt }: { projekt: ProjektDaten }) {
           Schließen
         </button>
       </div>
-      <form
-        action={projektAendern.bind(null, projekt.id)}
-        className="flex flex-wrap items-end gap-3"
-      >
+      <form action={speichern} className="flex flex-wrap items-end gap-3">
         <div>
           <label className="mb-1 block text-xs font-medium text-slate-500">
             Projektnummer *
@@ -105,7 +117,23 @@ export function ProjektEinstellungen({ projekt }: { projekt: ProjektDaten }) {
             className="w-36 rounded border border-slate-300 px-2 py-1.5 text-sm focus:border-blue-600 focus:outline-none"
           />
         </div>
-        <button className="rounded bg-blue-800 px-4 py-1.5 text-sm font-semibold text-white hover:bg-blue-900">
+        <div>
+          <label htmlFor="projekt-status" className="mb-1 block text-xs font-medium text-slate-500">
+            Status
+          </label>
+          <select
+            id="projekt-status"
+            name="status"
+            defaultValue={projekt.status}
+            className="rounded border border-slate-300 bg-white px-2 py-1.5 text-sm focus:border-blue-600 focus:outline-none"
+          >
+            <option value="AKTIV">Aktiv</option>
+            <option value="ABGESCHLOSSEN">Abgeschlossen</option>
+            <option value="ARCHIVIERT">Archiviert</option>
+          </select>
+        </div>
+        {fehler && <p role="alert" className="w-full text-sm text-red-700">{fehler}</p>}
+        <button disabled={pending} className="rounded bg-blue-800 px-4 py-1.5 text-sm font-semibold text-white hover:bg-blue-900 disabled:opacity-50">
           Speichern
         </button>
         <button

@@ -67,6 +67,7 @@ const rechnungStatusLabel: Record<string, string> = {
   ENTWURF: "Entwurf",
   GELEGT: "gelegt",
   BEZAHLT: "bezahlt",
+  STORNIERT: "storniert",
 };
 
 // ── Kopfleiste: Blätter + Rechnungen ────────────────────────────────
@@ -92,7 +93,7 @@ function AbrechnungKopf({
   const [neuBezeichnung, setNeuBezeichnung] = useState("");
   const [fehler, setFehler] = useState<string | null>(null);
 
-  const srVorhanden = rechnungen.some((r) => r.art === "SCHLUSSRECHNUNG");
+  const srVorhanden = rechnungen.some((r) => r.art === "SCHLUSSRECHNUNG" && r.status !== "STORNIERT");
   const entwurfVorhanden = rechnungen.some((r) => r.status === "ENTWURF");
 
   const anlegen = () => {
@@ -163,7 +164,9 @@ function AbrechnungKopf({
               key={r.id}
               href={`${basisPfad}/rechnungen/${r.id}`}
               className={`rounded-full px-2.5 py-1 text-xs hover:opacity-80 ${
-                r.status === "BEZAHLT"
+                r.status === "STORNIERT"
+                  ? "bg-red-100 text-red-800 line-through"
+                  : r.status === "BEZAHLT"
                   ? "bg-green-100 text-green-800"
                   : r.status === "GELEGT"
                     ? "bg-blue-100 text-blue-800"
@@ -171,7 +174,7 @@ function AbrechnungKopf({
               }`}
               title={`${r.art === "SCHLUSSRECHNUNG" ? "Schlussrechnung" : "Teilrechnung"} · ${rechnungStatusLabel[r.status]} · ${r.betragIstZahlbetrag ? "Zahlbetrag brutto" : "Leistungssumme netto (Entwurf)"}`}
             >
-              {r.art === "SCHLUSSRECHNUNG" ? "SR" : "TR"} {r.nummer} ·{" "}
+              {r.status === "STORNIERT" ? "Storniert · " : ""}{r.art === "SCHLUSSRECHNUNG" ? "SR" : "TR"} {r.nummer} ·{" "}
               {euro.format(r.betrag)}
             </Link>
           ))}
@@ -253,6 +256,7 @@ function ZeileRow({
 }) {
   const [entwurf, setEntwurf] = useState(zeile);
   const [pending, startTransition] = useTransition();
+  const [zeilenFehler, setZeilenFehler] = useState<string | null>(null);
   const gesperrt = zeile.rechnungNummer !== null || readonly;
 
   const berechnet = entwurf.ansatz.trim()
@@ -269,11 +273,16 @@ function ZeileRow({
   const speichern = () => {
     if (!dirty || gesperrt || ungueltig) return;
     startTransition(async () => {
-      await zeileAendern(lvId, zeile.id, {
-        bezeichnung: entwurf.bezeichnung,
-        ansatz: entwurf.ansatz,
-        menge,
-      });
+      try {
+        setZeilenFehler(null);
+        await zeileAendern(lvId, zeile.id, {
+          bezeichnung: entwurf.bezeichnung,
+          ansatz: entwurf.ansatz,
+          menge,
+        });
+      } catch (error) {
+        setZeilenFehler(error instanceof Error ? error.message : "Aufmaßzeile konnte nicht gespeichert werden.");
+      }
     });
   };
 
@@ -288,6 +297,7 @@ function ZeileRow({
     <tr className={`border-t border-slate-100 ${pending ? "opacity-50" : ""}`}>
       <td className="w-28 px-1 text-xs text-slate-500">
         {blatt ? `${blatt.nummer} ${blatt.bezeichnung}` : "–"}
+        {zeilenFehler && <div role="alert" className="text-[10px] text-red-700">{zeilenFehler}</div>}
       </td>
       <td>
         <input
@@ -381,6 +391,7 @@ function NeueZeileRow({
   const [ansatz, setAnsatz] = useState("");
   const [menge, setMenge] = useState(0);
   const [pending, startTransition] = useTransition();
+  const [fehler, setFehler] = useState<string | null>(null);
 
   const berechnet = ansatz.trim() ? ansatzAuswerten(ansatz) : null;
   const ungueltig = ansatz.trim() !== "" && berechnet === null;
@@ -389,14 +400,19 @@ function NeueZeileRow({
     if (!blattId || ungueltig) return;
     if (!bezeichnung.trim() && !ansatz.trim() && menge === 0) return;
     startTransition(async () => {
-      await zeileAnlegen(lvId, blattId, positionId, {
-        bezeichnung,
-        ansatz,
-        menge: berechnet ?? menge,
-      });
-      setBezeichnung("");
-      setAnsatz("");
-      setMenge(0);
+      try {
+        setFehler(null);
+        await zeileAnlegen(lvId, blattId, positionId, {
+          bezeichnung,
+          ansatz,
+          menge: berechnet ?? menge,
+        });
+        setBezeichnung("");
+        setAnsatz("");
+        setMenge(0);
+      } catch (error) {
+        setFehler(error instanceof Error ? error.message : "Aufmaßzeile konnte nicht angelegt werden.");
+      }
     });
   };
 
@@ -455,7 +471,7 @@ function NeueZeileRow({
           />
         )}
       </td>
-      <td />
+      <td className="text-[10px] text-red-700" role={fehler ? "alert" : undefined}>{fehler ?? ""}</td>
       <td className="w-8 p-1 text-center">
         <button
           title="Zeile anlegen"

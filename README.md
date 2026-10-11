@@ -42,6 +42,19 @@ Docker Desktop automatisch mit. Bei Datenbank-Problemen: `npm run db:logs`.
 
 Demo-Login: `demo@bausuccess.at` / `demo1234`
 
+**Hinweis zum Beleg-Snapshot-Backfill:** Die Migration ergänzt für bereits
+gelegte Rechnungen historische Belegkopien. Teilrechnungen werden aus den ihnen
+zugeordneten Aufmaßzeilen rekonstruiert. Bei älteren Schlussrechnungen stammen
+die Positions- und Zeilendaten aus den zum Migrationszeitpunkt noch vorhandenen
+Aufmaßzeilen; frühere Änderungen oder Löschungen lassen sich rückwirkend nicht
+zuverlässig rekonstruieren. Vor dem Produktiv-Upgrade sollten bestehende
+Schlussrechnungsbelege daher separat archiviert werden.
+
+Vertrags-LVs, die vor dieser Migration erzeugt wurden, haben noch keine
+eindeutige technische Verknüpfung zum bezuschlagten Angebot. Die Verknüpfung
+wird für neue Vertrags-LVs automatisch angelegt; ältere Verträge sollten vor
+einem Produktiv-Upgrade anhand ihrer Vergabeunterlagen geprüft werden.
+
 ## Produktiv starten (Docker)
 
 Die App wird als Docker-Stack betrieben: Next.js im Standalone-Modus

@@ -3,6 +3,14 @@
 import { revalidatePath } from "next/cache";
 import { prisma } from "@/lib/prisma";
 import { requireBearbeiter, requireUser } from "@/lib/session";
+import {
+  lbDatenValidieren,
+  type LbPositionsDaten,
+} from "@/lib/lb-position-validation";
+import {
+  standardPositionNachNummer,
+  standardPositionSuchen,
+} from "@/lib/lb-hb-katalog";
 
 // ── Verwaltung ──────────────────────────────────────────────────────
 
@@ -43,18 +51,12 @@ export async function lbGruppeLoeschen(gruppeId: string) {
   revalidatePath("/leistungsbuch");
 }
 
-export interface LbPositionsDaten {
-  nummer: string;
-  stichwort: string;
-  langtext: string;
-  einheit: string;
-}
-
 export async function lbPositionAnlegen(
   gruppeId: string,
   daten: LbPositionsDaten
 ) {
   const user = await requireBearbeiter();
+  const sichereDaten = lbDatenValidieren(daten, false) as LbPositionsDaten;
   const gruppe = await prisma.lbGruppe.findFirst({
     where: { id: gruppeId, tenantId: user.tenantId },
   });
@@ -64,7 +66,14 @@ export async function lbPositionAnlegen(
     _max: { sortier: true },
   });
   await prisma.lbPosition.create({
-    data: { gruppeId, ...daten, sortier: (max._max.sortier ?? 0) + 1 },
+    data: {
+      gruppeId,
+      nummer: sichereDaten.nummer,
+      stichwort: sichereDaten.stichwort,
+      langtext: sichereDaten.langtext,
+      einheit: sichereDaten.einheit,
+      sortier: (max._max.sortier ?? 0) + 1,
+    },
   });
   revalidatePath("/leistungsbuch");
 }
@@ -74,9 +83,15 @@ export async function lbPositionAendern(
   daten: Partial<LbPositionsDaten>
 ) {
   const user = await requireBearbeiter();
+  const sichereDaten = lbDatenValidieren(daten, true);
   await prisma.lbPosition.updateMany({
     where: { id: positionId, gruppe: { tenantId: user.tenantId } },
-    data: daten,
+    data: {
+      ...(sichereDaten.nummer !== undefined ? { nummer: sichereDaten.nummer } : {}),
+      ...(sichereDaten.stichwort !== undefined ? { stichwort: sichereDaten.stichwort } : {}),
+      ...(sichereDaten.langtext !== undefined ? { langtext: sichereDaten.langtext } : {}),
+      ...(sichereDaten.einheit !== undefined ? { einheit: sichereDaten.einheit } : {}),
+    },
   });
   revalidatePath("/leistungsbuch");
 }
@@ -96,13 +111,15 @@ export interface LbTreffer {
   nummer: string;
   stichwort: string;
   einheit: string;
+  langtext: string;
   gruppenPfad: string;
+  quelle: "FIRMA" | "LB_HB_023";
 }
 
 /** Sucht Stammpositionen für den Übernahme-Dialog im LV-Editor. */
 export async function lbSuchen(query: string): Promise<LbTreffer[]> {
   const user = await requireUser();
-  const q = query.trim();
+  const q = query.trim().slice(0, 100);
   const positionen = await prisma.lbPosition.findMany({
     where: {
       gruppe: { tenantId: user.tenantId },
@@ -118,17 +135,31 @@ export async function lbSuchen(query: string): Promise<LbTreffer[]> {
     },
     include: { gruppe: { include: { parent: true } } },
     orderBy: [{ gruppe: { nummer: "asc" } }, { sortier: "asc" }],
-    take: 30,
+    take: 15,
   });
-  return positionen.map((p) => ({
+  const firmenPositionen: LbTreffer[] = positionen.map((p) => ({
     id: p.id,
     nummer: p.nummer,
     stichwort: p.stichwort,
     einheit: p.einheit,
+    langtext: p.langtext,
     gruppenPfad: p.gruppe.parent
       ? `${p.gruppe.parent.nummer} ${p.gruppe.parent.bezeichnung} › ${p.gruppe.nummer} ${p.gruppe.bezeichnung}`
       : `${p.gruppe.nummer} ${p.gruppe.bezeichnung}`,
+    quelle: "FIRMA",
   }));
+  const standardPositionen: LbTreffer[] = standardPositionSuchen(q, 30).map(
+    (p) => ({
+      id: `lb-hb-023:${p.nummer}`,
+      nummer: p.nummer,
+      stichwort: p.stichwort,
+      einheit: p.einheit,
+      langtext: p.langtext,
+      gruppenPfad: p.gruppenPfad,
+      quelle: "LB_HB_023",
+    })
+  );
+  return [...firmenPositionen, ...standardPositionen];
 }
 
 /** Übernimmt eine Stammposition als neue Position in eine LV-Gruppe. */
@@ -138,19 +169,28 @@ export async function positionAusLbUebernehmen(
   lbPositionId: string
 ) {
   const user = await requireBearbeiter();
+  const standardNummer = lbPositionId.startsWith("lb-hb-023:")
+    ? lbPositionId.slice("lb-hb-023:".length)
+    : null;
   const [lv, gruppe, lbPosition] = await Promise.all([
     prisma.lv.findFirst({
       where: { id: lvId, projekt: { tenantId: user.tenantId } },
-      select: { id: true, projektId: true },
+      select: { id: true, projektId: true, angebotId: true, angebote: { where: { status: "ZUSCHLAG" }, select: { id: true } } },
     }),
     prisma.lvGruppe.findFirst({ where: { id: gruppeId, lvId } }),
-    prisma.lbPosition.findFirst({
-      where: { id: lbPositionId, gruppe: { tenantId: user.tenantId } },
-    }),
+    standardNummer
+      ? Promise.resolve(null)
+      : prisma.lbPosition.findFirst({
+          where: { id: lbPositionId, gruppe: { tenantId: user.tenantId } },
+        }),
   ]);
-  if (!lv || !gruppe || !lbPosition) {
+  const katalogPosition = standardNummer
+    ? standardPositionNachNummer(standardNummer)
+    : lbPosition;
+  if (!lv || !gruppe || !katalogPosition) {
     throw new Error("LV, Gruppe oder Stammposition nicht gefunden");
   }
+  if (lv.angebotId || lv.angebote.length) throw new Error("LV mit erteiltem Zuschlag kann nicht direkt bearbeitet werden.");
 
   const max = await prisma.position.aggregate({
     where: { gruppeId },
@@ -160,10 +200,10 @@ export async function positionAusLbUebernehmen(
     data: {
       lvId,
       gruppeId,
-      nummer: lbPosition.nummer,
-      stichwort: lbPosition.stichwort,
-      langtext: lbPosition.langtext,
-      einheit: lbPosition.einheit,
+      nummer: katalogPosition.nummer,
+      stichwort: katalogPosition.stichwort,
+      langtext: katalogPosition.langtext,
+      einheit: katalogPosition.einheit || "PA",
       menge: 0,
       epLohn: 0,
       epSonstiges: 0,

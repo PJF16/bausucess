@@ -10,9 +10,12 @@ async function kalkulationDesMandanten(kalkulationId: string) {
   const user = await requireBearbeiter();
   const kalk = await prisma.kalkulation.findFirst({
     where: { id: kalkulationId, lv: { projekt: { tenantId: user.tenantId } } },
-    include: { lv: { select: { id: true, projektId: true } } },
+    include: { lv: { select: { id: true, projektId: true, angebotId: true, angebote: { where: { status: "ZUSCHLAG" }, select: { id: true } } } } },
   });
   if (!kalk) throw new Error("Kalkulation nicht gefunden");
+  if (kalk.lv.angebotId || kalk.lv.angebote.length) {
+    throw new Error("LV mit erteiltem Zuschlag kann nicht über die Kalkulation geändert werden.");
+  }
   return kalk;
 }
 

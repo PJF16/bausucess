@@ -12,6 +12,7 @@ import {
   type PositionsDaten,
 } from "@/lib/actions/lv";
 import { LbUebernahme } from "@/components/lb-uebernahme";
+import { LbPositionssuche } from "@/components/lb-positionssuche";
 
 export interface GruppeNode {
   id: string;
@@ -398,12 +399,20 @@ function NeuePositionZeile({
         />
       </td>
       <td className="p-1">
-        <input
+        <LbPositionssuche
           className={inputCls}
-          placeholder="Stichwort der neuen Position …"
           value={entwurf.stichwort}
-          onChange={(e) => setEntwurf({ ...entwurf, stichwort: e.target.value })}
-          onKeyDown={(e) => e.key === "Enter" && anlegen()}
+          onChange={(stichwort) => setEntwurf({ ...entwurf, stichwort })}
+          onAuswahl={(position) =>
+            setEntwurf({
+              ...entwurf,
+              nummer: position.nummer,
+              stichwort: position.stichwort,
+              langtext: position.langtext,
+              einheit: position.einheit || entwurf.einheit,
+            })
+          }
+          onFreieEingabe={anlegen}
         />
       </td>
       <td className="w-24 p-1">
@@ -647,7 +656,7 @@ export function LvEditor({
 
       {/* Rechte Spalte: Positionen */}
       <section className="flex min-w-0 flex-1 flex-col">
-        <div className="flex items-center justify-between gap-3 border-b border-slate-200 bg-white px-4 py-2">
+        <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-200 bg-white px-4 py-2">
           <div className="text-sm font-semibold">
             {auswahl
               ? `${auswahl.nummer} ${auswahl.bezeichnung}`
@@ -667,7 +676,7 @@ export function LvEditor({
         </div>
         <div className="min-h-0 flex-1 overflow-auto">
           {auswahl ? (
-            <table className="w-full border-collapse text-sm">
+            <table className="w-full min-w-[1080px] border-collapse text-sm">
               <thead className="sticky top-0 bg-slate-100 text-left text-[11px] uppercase tracking-wide text-slate-500">
                 <tr>
                   <th className="px-1 py-1.5">Pos.-Nr.</th>

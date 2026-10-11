@@ -1,10 +1,35 @@
 "use server";
 
 import { revalidatePath } from "next/cache";
-import { redirect } from "next/navigation";
+import { redirect, unstable_rethrow } from "next/navigation";
 import { prisma } from "@/lib/prisma";
 import { requireBearbeiter } from "@/lib/session";
-import type { LvArt } from "@prisma/client";
+import type { LvArt, ProjektStatus } from "@prisma/client";
+
+const PROJEKT_STATUS: ReadonlySet<string> = new Set([
+  "AKTIV",
+  "ABGESCHLOSSEN",
+  "ARCHIVIERT",
+]);
+
+const LV_ARTEN: ReadonlySet<string> = new Set([
+  "ENTWURFS_LV",
+  "KOSTENSCHAETZUNGS_LV",
+  "AUSSCHREIBUNGS_LV",
+  "ANGEBOTS_LV",
+  "VERTRAGS_LV",
+  "ABRECHNUNGS_LV",
+]);
+
+class FormularFehler extends Error {}
+
+function prozent(formData: FormData, feld: string, bezeichnung: string) {
+  const wert = Number(formData.get(feld));
+  if (!Number.isFinite(wert) || wert < 0 || wert > 100) {
+    throw new FormularFehler(`${bezeichnung} muss zwischen 0 und 100 % liegen.`);
+  }
+  return wert;
+}
 
 export async function projektAnlegen(formData: FormData) {
   const user = await requireBearbeiter();
@@ -31,23 +56,56 @@ export async function projektAendern(projektId: string, formData: FormData) {
   const user = await requireBearbeiter();
   const nummer = String(formData.get("nummer") ?? "").trim();
   const bezeichnung = String(formData.get("bezeichnung") ?? "").trim();
-  if (!nummer || !bezeichnung) return;
+  const status = String(formData.get("status") ?? "");
+  if (!nummer || !bezeichnung) {
+    throw new FormularFehler("Projektnummer und Bezeichnung sind erforderlich.");
+  }
+  if (!PROJEKT_STATUS.has(status)) {
+    throw new FormularFehler("Ungültiger Projektstatus.");
+  }
 
-  await prisma.projekt.updateMany({
+  const aktualisiert = await prisma.projekt.updateMany({
     where: { id: projektId, tenantId: user.tenantId },
     data: {
       nummer,
       bezeichnung,
+      status: status as ProjektStatus,
       auftraggeber: String(formData.get("auftraggeber") ?? "").trim() || null,
       ort: String(formData.get("ort") ?? "").trim() || null,
     },
   });
+  if (aktualisiert.count === 0) throw new FormularFehler("Projekt nicht gefunden.");
   revalidatePath("/");
   revalidatePath(`/projekte/${projektId}`);
 }
 
+export async function projektAendernMitRueckmeldung(projektId: string, formData: FormData) {
+  try {
+    await projektAendern(projektId, formData);
+    return { error: "" };
+  } catch (error) {
+    unstable_rethrow(error);
+    return {
+      error: error instanceof FormularFehler
+        ? error.message
+        : "Projekt konnte nicht gespeichert werden.",
+    };
+  }
+}
+
 export async function projektLoeschen(projektId: string) {
   const user = await requireBearbeiter();
+  const vertraege = await prisma.lv.count({
+    where: {
+      projekt: { id: projektId, tenantId: user.tenantId },
+      angebotId: { not: null },
+    },
+  });
+  if (vertraege > 0) {
+    throw new Error(
+      "Das Projekt enthält ein Vertrags-LV mit Vergabehistorie und kann nicht gelöscht werden – bitte stattdessen archivieren"
+    );
+  }
   // Gelegte/bezahlte Rechnungen sind Belege – ein Projekt mit solchen
   // Rechnungen darf nicht per Kaskade verschwinden.
   const belege = await prisma.rechnung.count({
@@ -88,6 +146,18 @@ export async function lvAnlegen(projektId: string, formData: FormData) {
 
 export async function lvLoeschen(projektId: string, lvId: string) {
   const user = await requireBearbeiter();
+  const vertraege = await prisma.lv.count({
+    where: {
+      projekt: { id: projektId, tenantId: user.tenantId },
+      OR: [
+        { id: lvId, angebotId: { not: null } },
+        { angebot: { lvId } },
+      ],
+    },
+  });
+  if (vertraege > 0) {
+    throw new Error("Das LV ist mit einem Vertrags-LV verknüpft und kann nicht gelöscht werden");
+  }
   const belege = await prisma.rechnung.count({
     where: {
       lvId,
@@ -115,27 +185,63 @@ export async function lvAendern(
   const user = await requireBearbeiter();
   const bezeichnung = String(formData.get("bezeichnung") ?? "").trim();
   const art = String(formData.get("art") ?? "") as LvArt;
-  const ustSatz = Number(formData.get("ustSatz") ?? 20);
-  const deckungsruecklass = Number(formData.get("deckungsruecklass") ?? 0);
-  const haftruecklass = Number(formData.get("haftruecklass") ?? 0);
-  const skonto = Number(formData.get("skonto") ?? 0);
-  const skontoTage = Math.round(Number(formData.get("skontoTage") ?? 0));
-  if (!bezeichnung || !Number.isFinite(ustSatz)) return;
+  if (!bezeichnung) throw new FormularFehler("Die LV-Bezeichnung ist erforderlich.");
+  if (!LV_ARTEN.has(art)) throw new FormularFehler("Ungültige LV-Art.");
+  const ustSatz = prozent(formData, "ustSatz", "Der USt-Satz");
+  const deckungsruecklass = prozent(formData, "deckungsruecklass", "Der Deckungsrücklass");
+  const haftruecklass = prozent(formData, "haftruecklass", "Der Haftrücklass");
+  const skonto = prozent(formData, "skonto", "Der Skonto");
+  const skontoTage = Number(formData.get("skontoTage"));
+  if (!Number.isInteger(skontoTage) || skontoTage < 0 || skontoTage > 3650) {
+    throw new FormularFehler("Die Skontofrist muss zwischen 0 und 3650 Tagen liegen.");
+  }
 
-  await prisma.lv.updateMany({
+  const bisher = await prisma.lv.findFirst({
+    where: { id: lvId, projekt: { id: projektId, tenantId: user.tenantId } },
+    select: {
+      art: true,
+      angebotId: true,
+      angebote: { where: { vertragsLv: { isNot: null } }, select: { id: true }, take: 1 },
+    },
+  });
+  if (!bisher) throw new FormularFehler("LV nicht gefunden.");
+  if (art !== bisher.art && (bisher.angebotId || bisher.angebote.length > 0)) {
+    throw new FormularFehler("Die LV-Art ist nach der Vergabe festgelegt.");
+  }
+
+  const aktualisiert = await prisma.lv.updateMany({
     where: { id: lvId, projekt: { id: projektId, tenantId: user.tenantId } },
     data: {
       bezeichnung,
       art,
       ustSatz,
-      deckungsruecklass: Number.isFinite(deckungsruecklass) ? deckungsruecklass : 0,
-      haftruecklass: Number.isFinite(haftruecklass) ? haftruecklass : 0,
-      skonto: Number.isFinite(skonto) ? skonto : 0,
-      skontoTage: Number.isFinite(skontoTage) ? skontoTage : 0,
+      deckungsruecklass,
+      haftruecklass,
+      skonto,
+      skontoTage,
     },
   });
+  if (aktualisiert.count === 0) throw new FormularFehler("LV nicht gefunden.");
   revalidatePath(`/projekte/${projektId}`);
   revalidatePath(`/projekte/${projektId}/lv/${lvId}`);
+}
+
+export async function lvAendernMitRueckmeldung(
+  projektId: string,
+  lvId: string,
+  formData: FormData
+) {
+  try {
+    await lvAendern(projektId, lvId, formData);
+    return { error: "" };
+  } catch (error) {
+    unstable_rethrow(error);
+    return {
+      error: error instanceof FormularFehler
+        ? error.message
+        : "LV konnte nicht gespeichert werden.",
+    };
+  }
 }
 
 /**

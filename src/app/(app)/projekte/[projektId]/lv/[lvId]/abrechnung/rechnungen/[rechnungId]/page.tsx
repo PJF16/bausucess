@@ -1,11 +1,12 @@
 import Link from "next/link";
-import { notFound } from "next/navigation";
+import { notFound, redirect } from "next/navigation";
 import { prisma } from "@/lib/prisma";
 import { requireUser } from "@/lib/session";
 import { runde2 } from "@/lib/kalk";
 import { nettoAusBloecken, rechnungsSummen } from "@/lib/rechnung";
 import {
   rechnungLoeschen,
+  rechnungStornieren,
   rechnungStatusSetzen,
 } from "@/lib/actions/abrechnung";
 import { DruckButton } from "@/components/druck-button";
@@ -19,18 +20,43 @@ const zahl = new Intl.NumberFormat("de-AT", {
   maximumFractionDigits: 3,
 });
 
+type BelegZeile = {
+  id: string;
+  positionId: string;
+  bezeichnung: string;
+  ansatz: string;
+  menge: unknown;
+  sourceRechnungNummer?: number | null;
+  blatt: { nummer: number; bezeichnung: string };
+  rechnung: { id: string; nummer: number; art: string } | null;
+  position: {
+    id: string;
+    nummer: string;
+    stichwort: string;
+    langtext: string;
+    einheit: string;
+    epLohn: unknown;
+    epSonstiges: unknown;
+    menge?: unknown;
+  };
+};
+
 const statusLabel: Record<string, string> = {
   ENTWURF: "Entwurf",
   GELEGT: "Gelegt",
   BEZAHLT: "Bezahlt",
+  STORNIERT: "Storniert",
 };
 
 export default async function RechnungPage({
   params,
+  searchParams,
 }: {
   params: Promise<{ projektId: string; lvId: string; rechnungId: string }>;
+  searchParams?: Promise<{ fehler?: string }>;
 }) {
   const { projektId, lvId, rechnungId } = await params;
+  const fehler = (await searchParams)?.fehler;
   const user = await requireUser();
 
   const rechnung = await prisma.rechnung.findFirst({
@@ -41,6 +67,7 @@ export default async function RechnungPage({
     include: {
       lv: { include: { projekt: true } },
       positionen: true, // EP-Snapshot ab Legung
+      snapshotZeilen: { orderBy: [{ blattNummer: "asc" }, { sortier: "asc" }] },
       zeilen: {
         orderBy: { sortier: "asc" },
         include: { position: true, blatt: true },
@@ -65,7 +92,7 @@ export default async function RechnungPage({
   });
   const teilrechnungen = istSchlussrechnung
     ? await prisma.rechnung.findMany({
-        where: { lvId, art: "TEILRECHNUNG" },
+        where: { lvId, art: "TEILRECHNUNG", status: { not: "STORNIERT" } },
         orderBy: { nummer: "asc" },
       })
     : [];
@@ -78,16 +105,41 @@ export default async function RechnungPage({
     istGelegt ? (epSnapshot.get(positionId) ?? live) : live;
 
   // Zeilenbasis: TR rechnet die eigenen Zeilen ab, SR kumulativ alle
-  const basisZeilen = istSchlussrechnung
+  const liveBasisZeilen = istSchlussrechnung
     ? alleAbgerechnet
     : rechnung.zeilen.map((z) => ({
         ...z,
         rechnung: { id: rechnung.id, nummer: rechnung.nummer, art: rechnung.art },
       }));
 
+  const basisZeilen: BelegZeile[] = istGelegt
+    ? rechnung.snapshotZeilen.map((z) => ({
+        id: z.id,
+        positionId: z.positionId,
+        bezeichnung: z.zeilenBezeichnung,
+        ansatz: z.ansatz,
+        menge: z.menge,
+        sourceRechnungNummer: z.sourceRechnungNummer,
+        blatt: { nummer: z.blattNummer, bezeichnung: z.blattBezeichnung },
+        rechnung: { id: rechnung.id, nummer: rechnung.nummer, art: rechnung.art },
+        position: {
+          id: z.positionId,
+          nummer: z.positionsNummer,
+          stichwort: z.positionStichwort,
+          langtext: z.positionLangtext,
+          einheit: z.einheit,
+          epLohn: z.ep,
+          epSonstiges: 0,
+        },
+      }))
+    : liveBasisZeilen.map((z) => ({
+        ...z,
+        rechnung: z.rechnung ? { id: z.rechnung.id, nummer: z.rechnung.nummer, art: z.rechnung.art } : null,
+      }));
+
   const jePosition = new Map<
     string,
-    { position: (typeof basisZeilen)[number]["position"]; zeilen: typeof basisZeilen }
+    { position: BelegZeile["position"]; zeilen: BelegZeile[] }
   >();
   for (const z of basisZeilen) {
     const eintrag = jePosition.get(z.positionId) ?? {
@@ -116,7 +168,7 @@ export default async function RechnungPage({
       position.id,
       runde2(Number(position.epLohn) + Number(position.epSonstiges))
     );
-    const sollMenge = Number(position.menge);
+    const sollMenge = istGelegt ? 0 : Number(position.menge);
     const kumuliert = abgerechnetJePosition.get(position.id) ?? 0;
     return {
       position,
@@ -155,6 +207,27 @@ export default async function RechnungPage({
 
   const basisPfad = `/projekte/${projektId}/lv/${lvId}/abrechnung`;
   const artLabel = istSchlussrechnung ? "Schlussrechnung" : "Teilrechnung";
+  const rechnungKey = rechnung.id;
+
+  async function statusAktion(formData: FormData) {
+    "use server";
+    try {
+      const status = String(formData.get("status"));
+      if (status !== "GELEGT" && status !== "BEZAHLT") throw new Error("Ungültiger Status");
+      await rechnungStatusSetzen(lvId, rechnungKey, status);
+    } catch (error) {
+      redirect(`${basisPfad}/rechnungen/${rechnungKey}?fehler=${encodeURIComponent(error instanceof Error ? error.message : "Rechnung konnte nicht geändert werden")}`);
+    }
+  }
+
+  async function stornoAktion(formData: FormData) {
+    "use server";
+    try {
+      await rechnungStornieren(lvId, rechnungKey, String(formData.get("grund") ?? ""));
+    } catch (error) {
+      redirect(`${basisPfad}/rechnungen/${rechnungKey}?fehler=${encodeURIComponent(error instanceof Error ? error.message : "Storno konnte nicht durchgeführt werden")}`);
+    }
+  }
 
   return (
     <div className="mx-auto max-w-4xl p-6">
@@ -162,11 +235,13 @@ export default async function RechnungPage({
         <Link href="/" className="hover:underline">Projekte</Link>
         {" / "}
         <Link href={`/projekte/${projektId}`} className="hover:underline">
-          {rechnung.lv.projekt.nummer} {rechnung.lv.projekt.bezeichnung}
+          {istGelegt
+            ? `${rechnung.snapshotProjektNummer ?? rechnung.lv.projekt.nummer} ${rechnung.snapshotProjektBezeichnung ?? rechnung.lv.projekt.bezeichnung}`
+            : `${rechnung.lv.projekt.nummer} ${rechnung.lv.projekt.bezeichnung}`}
         </Link>
         {" / "}
         <Link href={basisPfad} className="hover:underline">
-          {rechnung.lv.bezeichnung} – Abrechnung
+            {istGelegt ? rechnung.snapshotLvBezeichnung ?? rechnung.lv.bezeichnung : rechnung.lv.bezeichnung} – Abrechnung
         </Link>
       </div>
 
@@ -177,7 +252,7 @@ export default async function RechnungPage({
           </h1>
           <p className="text-sm text-slate-500">
             {rechnung.datum.toLocaleDateString("de-AT")} ·{" "}
-            {rechnung.lv.projekt.auftraggeber ?? "–"} · Status:{" "}
+            {(istGelegt ? rechnung.snapshotAuftraggeber : rechnung.lv.projekt.auftraggeber) ?? "–"} · Status:{" "}
             <span className="font-semibold">{statusLabel[rechnung.status]}</span>
             {rechnung.gelegtAm && (
               <> · gelegt am {rechnung.gelegtAm.toLocaleDateString("de-AT")}</>
@@ -189,8 +264,9 @@ export default async function RechnungPage({
           {user.rolle !== "LESER" && rechnung.status === "ENTWURF" && (
             <>
               <form
-                action={rechnungStatusSetzen.bind(null, lvId, rechnung.id, "GELEGT")}
+                action={statusAktion}
               >
+                <input type="hidden" name="status" value="GELEGT" />
                 <button className="rounded bg-blue-800 px-3 py-1.5 text-xs font-semibold text-white hover:bg-blue-900">
                   Rechnung legen
                 </button>
@@ -204,11 +280,18 @@ export default async function RechnungPage({
           )}
           {user.rolle !== "LESER" && rechnung.status === "GELEGT" && (
             <form
-              action={rechnungStatusSetzen.bind(null, lvId, rechnung.id, "BEZAHLT")}
+              action={statusAktion}
             >
+              <input type="hidden" name="status" value="BEZAHLT" />
               <button className="rounded bg-green-700 px-3 py-1.5 text-xs font-semibold text-white hover:bg-green-800">
                 Als bezahlt markieren
               </button>
+            </form>
+          )}
+          {user.rolle !== "LESER" && rechnung.status === "GELEGT" && (
+            <form action={stornoAktion} className="flex gap-1">
+              <input name="grund" required minLength={3} placeholder="Stornogrund" aria-label="Stornogrund" className="w-32 rounded border px-2 py-1 text-xs" />
+              <button className="rounded border border-red-300 px-3 py-1.5 text-xs font-semibold text-red-700 hover:bg-red-50">Stornieren</button>
             </form>
           )}
         </div>
@@ -220,6 +303,17 @@ export default async function RechnungPage({
           LV-Konditionen. Beim Legen werden sie eingefroren.
         </p>
       )}
+      {rechnung.status === "STORNIERT" && (
+        <p className="mb-4 rounded border border-red-200 bg-red-50 px-3 py-2 text-xs text-red-800">
+          Storniert am {rechnung.storniertAm?.toLocaleDateString("de-AT")} · Grund: {rechnung.stornoGrund ?? "–"}. Dieser Beleg bleibt als historische Kopie erhalten.
+        </p>
+      )}
+      {rechnung.status === "BEZAHLT" && (
+        <p className="mb-4 rounded border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800 print:hidden">
+          Diese Rechnung ist als bezahlt markiert. Rückzahlung und Gutschrift können in der Abrechnung noch nicht erfasst werden; daher ist ein Storno hier gesperrt.
+        </p>
+      )}
+      {fehler && <p role="alert" className="mb-4 rounded border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-800">{fehler}</p>}
       {ueberschrittene.length > 0 && (
         <p className="mb-4 rounded border border-red-200 bg-red-50 px-3 py-2 text-xs text-red-700 print:hidden">
           ⚠ Überabrechnung: Bei {ueberschrittene.length}{" "}
@@ -270,9 +364,9 @@ export default async function RechnungPage({
                         <span className="text-slate-400">
                           Blatt {z.blatt.nummer}
                         </span>
-                        {istSchlussrechnung && z.rechnung && z.rechnung.id !== rechnung.id && (
+                        {istSchlussrechnung && z.sourceRechnungNummer && z.sourceRechnungNummer !== rechnung.nummer && (
                           <span className="rounded bg-slate-100 px-1 text-[10px] font-semibold text-slate-500">
-                            TR {z.rechnung.nummer}
+                            TR {z.sourceRechnungNummer}
                           </span>
                         )}
                         <span>{z.bezeichnung || "–"}</span>
@@ -355,7 +449,7 @@ export default async function RechnungPage({
                 <tr>
                   <td colSpan={5} className="px-3 py-1.5 text-right text-slate-600">
                     abzüglich bereits verrechneter Teilrechnungen
-                    {teilrechnungen.length > 0 && (
+                    {!istGelegt && teilrechnungen.length > 0 && (
                       <span className="text-xs text-slate-400">
                         {" "}
                         (TR {teilrechnungen.map((r) => r.nummer).join(", ")})

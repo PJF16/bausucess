@@ -10,10 +10,18 @@ async function lvDesMandanten(lvId: string) {
   const user = await requireBearbeiter();
   const lv = await prisma.lv.findFirst({
     where: { id: lvId, projekt: { tenantId: user.tenantId } },
-    select: { id: true, projektId: true },
+    select: { id: true, projektId: true, angebotId: true, angebote: { where: { status: "ZUSCHLAG" }, select: { id: true } } },
   });
   if (!lv) throw new Error("LV nicht gefunden");
+  lvDirektBearbeitbar(lv);
+  if (lv.angebote.length) throw new Error("Ein LV mit erteiltem Zuschlag ist bis zur Vertragserstellung gegen Änderungen gesperrt.");
   return lv;
+}
+
+function lvDirektBearbeitbar(lv: { angebotId?: string | null }) {
+  if (lv.angebotId) {
+    throw new Error("Vertrags-LV kann nicht direkt bearbeitet werden. Änderungen bitte als Nachtrag erfassen.");
+  }
 }
 
 function lvPfad(projektId: string, lvId: string) {

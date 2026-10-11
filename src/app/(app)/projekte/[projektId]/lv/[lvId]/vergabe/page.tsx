@@ -26,14 +26,14 @@ export default async function VergabePage({
       positionen: { orderBy: [{ sortier: "asc" }] },
       angebote: {
         orderBy: { createdAt: "asc" },
-        include: { bieter: true, preise: true },
+        include: { bieter: true, preise: true, vertragsLv: { select: { id: true } } },
       },
     },
   });
   if (!lv) notFound();
 
   const alleBieter = await prisma.bieter.findMany({
-    where: { tenantId: user.tenantId },
+    where: { tenantId: user.tenantId, archiviertAm: null },
     orderBy: { firma: "asc" },
   });
 
@@ -61,6 +61,7 @@ export default async function VergabePage({
     bieterId: a.bieterId,
     firma: a.bieter.firma,
     status: a.status,
+    vertragsLvId: a.vertragsLv?.id ?? null,
     preise: Object.fromEntries(a.preise.map((p) => [p.positionId, Number(p.ep)])),
   }));
 
@@ -93,6 +94,7 @@ export default async function VergabePage({
         </nav>
       </div>
       <VergabeEditor
+        projektId={lv.projekt.id}
         lvId={lv.id}
         gruppen={gruppen}
         positionen={positionen}

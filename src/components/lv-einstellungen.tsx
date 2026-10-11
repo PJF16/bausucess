@@ -1,7 +1,7 @@
 "use client";
 
 import { useState, useTransition } from "react";
-import { lvAendern, lvDuplizieren, lvLoeschen } from "@/lib/actions/projekte";
+import { lvAendernMitRueckmeldung, lvDuplizieren, lvLoeschen } from "@/lib/actions/projekte";
 import { lvArtLabel } from "@/lib/labels";
 
 export interface LvEinstellungenDaten {
@@ -19,7 +19,21 @@ export interface LvEinstellungenDaten {
 
 export function LvEinstellungen({ lv }: { lv: LvEinstellungenDaten }) {
   const [offen, setOffen] = useState(false);
+  const [fehler, setFehler] = useState("");
   const [pending, startTransition] = useTransition();
+
+  const speichern = (formData: FormData) => {
+    setFehler("");
+    startTransition(async () => {
+      try {
+        const ergebnis = await lvAendernMitRueckmeldung(lv.projektId, lv.lvId, formData);
+        if (ergebnis.error) setFehler(ergebnis.error);
+        else setOffen(false);
+      } catch {
+        setFehler("LV konnte nicht gespeichert werden.");
+      }
+    });
+  };
 
   const loeschen = () => {
     const ok = window.confirm(
@@ -28,7 +42,13 @@ export function LvEinstellungen({ lv }: { lv: LvEinstellungenDaten }) {
     );
     if (!ok) return;
     startTransition(async () => {
-      await lvLoeschen(lv.projektId, lv.lvId);
+      try {
+        await lvLoeschen(lv.projektId, lv.lvId);
+      } catch {
+        window.alert(
+          "Das LV enthält möglicherweise gelegte Rechnungen oder ist mit einem Vertrags-LV verknüpft und kann nicht gelöscht werden."
+        );
+      }
     });
   };
 
@@ -60,10 +80,7 @@ export function LvEinstellungen({ lv }: { lv: LvEinstellungenDaten }) {
           <h3 className="mb-3 text-xs font-semibold uppercase tracking-wide text-slate-500">
             LV-Einstellungen
           </h3>
-          <form
-            action={lvAendern.bind(null, lv.projektId, lv.lvId)}
-            className="space-y-3"
-          >
+          <form action={speichern} className="space-y-3">
             <div>
               <label className="mb-1 block text-xs font-medium text-slate-500">
                 Bezeichnung *
@@ -100,6 +117,8 @@ export function LvEinstellungen({ lv }: { lv: LvEinstellungenDaten }) {
                   name="ustSatz"
                   type="number"
                   step="0.01"
+                  min="0"
+                  max="100"
                   defaultValue={lv.ustSatz}
                   className="w-20 rounded border border-slate-300 px-2 py-1.5 text-right font-mono text-sm focus:border-blue-600 focus:outline-none"
                 />
@@ -163,13 +182,15 @@ export function LvEinstellungen({ lv }: { lv: LvEinstellungenDaten }) {
                     type="number"
                     step="1"
                     min="0"
+                    max="3650"
                     defaultValue={lv.skontoTage}
                     className="w-full rounded border border-slate-300 px-2 py-1.5 text-right font-mono text-sm focus:border-blue-600 focus:outline-none"
                   />
                 </div>
               </div>
             </div>
-            <button className="w-full rounded bg-blue-800 py-1.5 text-sm font-semibold text-white hover:bg-blue-900">
+            {fehler && <p role="alert" className="text-sm text-red-700">{fehler}</p>}
+            <button disabled={pending} className="w-full rounded bg-blue-800 py-1.5 text-sm font-semibold text-white hover:bg-blue-900 disabled:opacity-50">
               Speichern
             </button>
           </form>

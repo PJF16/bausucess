@@ -3,6 +3,7 @@
 import { revalidatePath } from "next/cache";
 import { prisma } from "@/lib/prisma";
 import { requireBearbeiter } from "@/lib/session";
+import type { Prisma } from "@prisma/client";
 
 async function lvDesMandanten(lvId: string) {
   const user = await requireBearbeiter();
@@ -29,6 +30,23 @@ async function offenerNachtrag(lvId: string, nachtragId: string) {
   return nachtrag;
 }
 
+/**
+ * Sperrt die Nachtragszeile in der Transaktion und prüft ihren Status erneut.
+ * So kann ein paralleles Beauftragen nicht zwischen Statusprüfung und
+ * Positionsänderung rutschen.
+ */
+async function offenenNachtragSperren(
+  tx: Prisma.TransactionClient,
+  lvId: string,
+  nachtragId: string
+) {
+  const offen = await tx.nachtrag.updateMany({
+    where: { id: nachtragId, lvId, status: "ANGEBOTEN" },
+    data: { status: "ANGEBOTEN" },
+  });
+  if (!offen.count) throw new Error("Beauftragte Nachträge können nicht geändert werden");
+}
+
 // ── Nachträge ───────────────────────────────────────────────────────
 
 export async function nachtragAnlegen(lvId: string, bezeichnung: string) {
@@ -51,7 +69,10 @@ export async function nachtragAnlegen(lvId: string, bezeichnung: string) {
 export async function nachtragLoeschen(lvId: string, nachtragId: string) {
   const lv = await lvDesMandanten(lvId);
   await offenerNachtrag(lvId, nachtragId);
-  await prisma.nachtrag.delete({ where: { id: nachtragId } });
+  await prisma.$transaction(async (tx) => {
+    await offenenNachtragSperren(tx, lvId, nachtragId);
+    await tx.nachtrag.delete({ where: { id: nachtragId } });
+  });
   revalidatePath(ntPfad(lv.projektId, lvId));
 }
 
@@ -90,6 +111,18 @@ export async function nachtragBeauftragen(lvId: string, nachtragId: string) {
   }
 
   await prisma.$transaction(async (tx) => {
+    // Status als ERSTE Operation bedingt umsetzen: Bei zwei gleichzeitigen
+    // Beauftragungen (zwei Tabs/Nutzer) gewinnt genau eine Transaktion, die
+    // zweite findet keinen offenen Nachtrag mehr und bricht ab – sonst
+    // würden die Positionen doppelt ins LV übernommen.
+    const beauftragt = await tx.nachtrag.updateMany({
+      where: { id: nachtragId, lvId, status: "ANGEBOTEN" },
+      data: { status: "BEAUFTRAGT", beauftragtAm: new Date() },
+    });
+    if (beauftragt.count === 0) {
+      throw new Error("Nachtrag wurde bereits beauftragt");
+    }
+
     const maxSortier = await tx.lvGruppe.aggregate({
       where: { lvId, parentId: null },
       _max: { sortier: true },
@@ -126,11 +159,6 @@ export async function nachtragBeauftragen(lvId: string, nachtragId: string) {
         data: { uebernommenePositionId: position.id },
       });
     }
-
-    await tx.nachtrag.update({
-      where: { id: nachtrag.id },
-      data: { status: "BEAUFTRAGT", beauftragtAm: new Date() },
-    });
   });
 
   revalidatePath(ntPfad(lv.projektId, lvId));
@@ -149,6 +177,34 @@ export interface NtPositionsDaten {
   epSonstiges: number;
 }
 
+function endlicheZahl(wert: unknown, feld: string): number {
+  if (typeof wert !== "number" || !Number.isFinite(wert)) {
+    throw new Error(`Ungültiger Wert für ${feld}`);
+  }
+  return wert;
+}
+
+/**
+ * Übernimmt nur die bekannten Felder (Server Actions sind öffentliche
+ * Endpunkte – ein Spread der Client-Daten könnte sonst nachtragId oder
+ * uebernommenePositionId überschreiben) und validiert die Zahlen.
+ */
+function ntPositionsDaten(
+  daten: Partial<NtPositionsDaten>
+): Partial<NtPositionsDaten> {
+  const d: Partial<NtPositionsDaten> = {};
+  if (daten.nummer !== undefined) d.nummer = String(daten.nummer).trim();
+  if (daten.stichwort !== undefined) d.stichwort = String(daten.stichwort).trim();
+  if (daten.langtext !== undefined) d.langtext = String(daten.langtext);
+  if (daten.einheit !== undefined) d.einheit = String(daten.einheit).trim();
+  if (daten.menge !== undefined) d.menge = endlicheZahl(daten.menge, "Menge");
+  if (daten.epLohn !== undefined) d.epLohn = endlicheZahl(daten.epLohn, "EP Lohn");
+  if (daten.epSonstiges !== undefined) {
+    d.epSonstiges = endlicheZahl(daten.epSonstiges, "EP Sonstiges");
+  }
+  return d;
+}
+
 export async function ntPositionAnlegen(
   lvId: string,
   nachtragId: string,
@@ -156,12 +212,16 @@ export async function ntPositionAnlegen(
 ) {
   const lv = await lvDesMandanten(lvId);
   await offenerNachtrag(lvId, nachtragId);
-  const max = await prisma.nachtragsPosition.aggregate({
-    where: { nachtragId },
-    _max: { sortier: true },
-  });
-  await prisma.nachtragsPosition.create({
-    data: { nachtragId, ...daten, sortier: (max._max.sortier ?? 0) + 1 },
+  await prisma.$transaction(async (tx) => {
+    await offenenNachtragSperren(tx, lvId, nachtragId);
+    const max = await tx.nachtragsPosition.aggregate({ where: { nachtragId }, _max: { sortier: true } });
+    await tx.nachtragsPosition.create({
+      data: {
+        ...(ntPositionsDaten(daten) as NtPositionsDaten),
+        nachtragId,
+        sortier: (max._max.sortier ?? 0) + 1,
+      },
+    });
   });
   revalidatePath(ntPfad(lv.projektId, lvId));
 }
@@ -174,9 +234,12 @@ export async function ntPositionAendern(
 ) {
   const lv = await lvDesMandanten(lvId);
   await offenerNachtrag(lvId, nachtragId);
-  await prisma.nachtragsPosition.updateMany({
-    where: { id: positionId, nachtragId },
-    data: daten,
+  await prisma.$transaction(async (tx) => {
+    await offenenNachtragSperren(tx, lvId, nachtragId);
+    await tx.nachtragsPosition.updateMany({
+      where: { id: positionId, nachtragId },
+      data: ntPositionsDaten(daten),
+    });
   });
   revalidatePath(ntPfad(lv.projektId, lvId));
 }
@@ -188,8 +251,11 @@ export async function ntPositionLoeschen(
 ) {
   const lv = await lvDesMandanten(lvId);
   await offenerNachtrag(lvId, nachtragId);
-  await prisma.nachtragsPosition.deleteMany({
-    where: { id: positionId, nachtragId },
+  await prisma.$transaction(async (tx) => {
+    await offenenNachtragSperren(tx, lvId, nachtragId);
+    await tx.nachtragsPosition.deleteMany({
+      where: { id: positionId, nachtragId },
+    });
   });
   revalidatePath(ntPfad(lv.projektId, lvId));
 }

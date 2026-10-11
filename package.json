@@ -10,6 +10,7 @@
     "db": "docker start clone-auer-db 2>/dev/null || docker run -d --name clone-auer-db --restart unless-stopped -e POSTGRES_USER=auer -e POSTGRES_PASSWORD=auer -e POSTGRES_DB=auer -p 5433:5432 postgres:16-alpine",
     "db:logs": "docker logs clone-auer-db --tail 50",
     "seed": "tsx prisma/seed.ts",
+    "catalog:import": "tsx scripts/import-lb-hb.ts",
     "deploy:build": "docker compose --env-file .env.deploy -f docker-compose.prod.yml build",
     "deploy:up": "docker compose --env-file .env.deploy -f docker-compose.prod.yml up -d",
     "deploy:down": "docker compose --env-file .env.deploy -f docker-compose.prod.yml down",

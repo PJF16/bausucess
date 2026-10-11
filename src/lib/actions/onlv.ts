@@ -23,10 +23,13 @@ export async function lvImportieren(
 
   const datei = formData.get("datei");
   if (!(datei instanceof File) || datei.size === 0) {
-    return { error: "Bitte eine .onlv-Datei auswählen." };
+    return { error: "Bitte eine .onlv- oder XML-Datei auswählen." };
   }
   if (datei.size > 10 * 1024 * 1024) {
     return { error: "Die Datei ist zu groß (max. 10 MB)." };
+  }
+  if (!/\.(onlv|xml)$/i.test(datei.name)) {
+    return { error: "Dieses Dateiformat wird nicht unterstützt. Bitte eine .onlv- oder .xml-Datei auswählen." };
   }
 
   let xml: string;

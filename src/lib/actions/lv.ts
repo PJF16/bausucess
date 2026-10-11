@@ -3,17 +3,25 @@
 import { revalidatePath } from "next/cache";
 import { prisma } from "@/lib/prisma";
 import { requireBearbeiter } from "@/lib/session";
-import type { GruppenEbene, PositionsArt } from "@prisma/client";
+import type { GruppenEbene, PositionsArt, Prisma } from "@prisma/client";
 
 /** Stellt sicher, dass das LV zum Mandanten des angemeldeten Users gehört. */
 async function lvDesMandanten(lvId: string) {
   const user = await requireBearbeiter();
   const lv = await prisma.lv.findFirst({
     where: { id: lvId, projekt: { tenantId: user.tenantId } },
-    select: { id: true, projektId: true },
+    select: { id: true, projektId: true, angebotId: true, angebote: { where: { status: "ZUSCHLAG" }, select: { id: true } } },
   });
   if (!lv) throw new Error("LV nicht gefunden");
+  lvDirektBearbeitbar(lv);
+  if (lv.angebote.length) throw new Error("Ein LV mit erteiltem Zuschlag ist bis zur Vertragserstellung gegen Änderungen gesperrt.");
   return lv;
+}
+
+function lvDirektBearbeitbar(lv: { angebotId?: string | null }) {
+  if (lv.angebotId) {
+    throw new Error("Vertrags-LV kann nicht direkt bearbeitet werden. Änderungen bitte als Nachtrag erfassen.");
+  }
 }
 
 function lvPfad(projektId: string, lvId: string) {
@@ -80,8 +88,64 @@ export async function gruppeAendern(
 
 export async function gruppeLoeschen(lvId: string, gruppeId: string) {
   const lv = await lvDesMandanten(lvId);
+
+  // Alle Untergruppen einsammeln – das Löschen kaskadiert über die ganze
+  // Hierarchie samt Positionen und deren Aufmaßzeilen.
+  const alle = await prisma.lvGruppe.findMany({
+    where: { lvId },
+    select: { id: true, parentId: true },
+  });
+  if (!alle.some((g) => g.id === gruppeId)) return;
+  const betroffen = new Set<string>([gruppeId]);
+  let gewachsen = true;
+  while (gewachsen) {
+    gewachsen = false;
+    for (const g of alle) {
+      if (g.parentId && betroffen.has(g.parentId) && !betroffen.has(g.id)) {
+        betroffen.add(g.id);
+        gewachsen = true;
+      }
+    }
+  }
+  const gruppenIds = Array.from(betroffen);
+  await loeschenVerhindernWennAbgerechnet({ gruppeId: { in: gruppenIds } });
+
   await prisma.lvGruppe.deleteMany({ where: { id: gruppeId, lvId } });
   revalidatePath(lvPfad(lv.projektId, lvId));
+}
+
+/**
+ * Verhindert das Löschen von Positionen, an denen Abrechnungs- oder
+ * Nachtragsdaten hängen – die Kaskade würde sonst Aufmaß (Beweissicherung!)
+ * und Rechnungsinhalte stillschweigend mitlöschen.
+ */
+async function loeschenVerhindernWennAbgerechnet(
+  positionsFilter: Prisma.PositionWhereInput
+) {
+  const abgerechnet = await prisma.aufmasszeile.count({
+    where: { rechnungId: { not: null }, position: positionsFilter },
+  });
+  if (abgerechnet > 0) {
+    throw new Error(
+      "Bereits abgerechnete Positionen können nicht gelöscht werden"
+    );
+  }
+  const aufmass = await prisma.aufmasszeile.count({
+    where: { position: positionsFilter },
+  });
+  if (aufmass > 0) {
+    throw new Error(
+      "An der Position hängen Aufmaßzeilen – bitte zuerst das Aufmaß löschen"
+    );
+  }
+  const nachtrag = await prisma.nachtragsPosition.count({
+    where: { uebernommenePosition: positionsFilter },
+  });
+  if (nachtrag > 0) {
+    throw new Error(
+      "Positionen aus einem beauftragten Nachtrag können nicht gelöscht werden"
+    );
+  }
 }
 
 // ── Positionen ──────────────────────────────────────────────────────
@@ -95,6 +159,44 @@ export interface PositionsDaten {
   art: PositionsArt;
   epLohn: number;
   epSonstiges: number;
+}
+
+const POSITIONS_ARTEN: ReadonlySet<string> = new Set([
+  "NORMAL",
+  "WESENTLICH",
+  "EVENTUAL",
+  "ALTERNATIV",
+  "REGIE",
+]);
+
+function endlicheZahl(wert: unknown, feld: string): number {
+  if (typeof wert !== "number" || !Number.isFinite(wert)) {
+    throw new Error(`Ungültiger Wert für ${feld}`);
+  }
+  return wert;
+}
+
+/**
+ * Übernimmt nur die bekannten Positionsfelder (Server Actions sind
+ * öffentliche Endpunkte – ein Spread der Client-Daten könnte sonst z. B.
+ * lvId oder gruppeId überschreiben) und validiert die Zahlen.
+ */
+function positionsDaten(daten: Partial<PositionsDaten>): Partial<PositionsDaten> {
+  const d: Partial<PositionsDaten> = {};
+  if (daten.nummer !== undefined) d.nummer = String(daten.nummer).trim();
+  if (daten.stichwort !== undefined) d.stichwort = String(daten.stichwort).trim();
+  if (daten.langtext !== undefined) d.langtext = String(daten.langtext);
+  if (daten.einheit !== undefined) d.einheit = String(daten.einheit).trim();
+  if (daten.menge !== undefined) d.menge = endlicheZahl(daten.menge, "Menge");
+  if (daten.epLohn !== undefined) d.epLohn = endlicheZahl(daten.epLohn, "EP Lohn");
+  if (daten.epSonstiges !== undefined) {
+    d.epSonstiges = endlicheZahl(daten.epSonstiges, "EP Sonstiges");
+  }
+  if (daten.art !== undefined) {
+    if (!POSITIONS_ARTEN.has(daten.art)) throw new Error("Ungültige Positionsart");
+    d.art = daten.art;
+  }
+  return d;
 }
 
 export async function positionAnlegen(
@@ -113,9 +215,9 @@ export async function positionAnlegen(
   });
   await prisma.position.create({
     data: {
+      ...(positionsDaten(daten) as PositionsDaten),
       lvId,
       gruppeId,
-      ...daten,
       sortier: (max._max.sortier ?? 0) + 1,
     },
   });
@@ -130,13 +232,14 @@ export async function positionAendern(
   const lv = await lvDesMandanten(lvId);
   await prisma.position.updateMany({
     where: { id: positionId, lvId },
-    data: daten,
+    data: positionsDaten(daten),
   });
   revalidatePath(lvPfad(lv.projektId, lvId));
 }
 
 export async function positionLoeschen(lvId: string, positionId: string) {
   const lv = await lvDesMandanten(lvId);
+  await loeschenVerhindernWennAbgerechnet({ id: positionId, lvId });
   await prisma.position.deleteMany({ where: { id: positionId, lvId } });
   revalidatePath(lvPfad(lv.projektId, lvId));
 }

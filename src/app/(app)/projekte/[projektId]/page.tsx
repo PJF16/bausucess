@@ -39,6 +39,9 @@ export default async function ProjektPage({
         <Link href="/" className="hover:underline">Projekte</Link> / {projekt.nummer}
       </div>
       <h1 className="mb-1 text-xl font-bold">{projekt.bezeichnung}</h1>
+      <p className="mb-2 text-xs font-medium text-slate-600">
+        Status: {projekt.status === "AKTIV" ? "Aktiv" : projekt.status === "ABGESCHLOSSEN" ? "Abgeschlossen" : "Archiviert"}
+      </p>
       <p className="mb-2 text-sm text-slate-500">
         {projekt.auftraggeber && <>AG: {projekt.auftraggeber} · </>}
         {projekt.ort}
@@ -52,6 +55,7 @@ export default async function ProjektPage({
               bezeichnung: projekt.bezeichnung,
               auftraggeber: projekt.auftraggeber,
               ort: projekt.ort,
+              status: projekt.status,
               anzahlLvs: projekt.lvs.length,
             }}
           />

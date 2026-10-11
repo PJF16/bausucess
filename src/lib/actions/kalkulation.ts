@@ -10,9 +10,12 @@ async function kalkulationDesMandanten(kalkulationId: string) {
   const user = await requireBearbeiter();
   const kalk = await prisma.kalkulation.findFirst({
     where: { id: kalkulationId, lv: { projekt: { tenantId: user.tenantId } } },
-    include: { lv: { select: { id: true, projektId: true } } },
+    include: { lv: { select: { id: true, projektId: true, angebotId: true, angebote: { where: { status: "ZUSCHLAG" }, select: { id: true } } } } },
   });
   if (!kalk) throw new Error("Kalkulation nicht gefunden");
+  if (kalk.lv.angebotId || kalk.lv.angebote.length) {
+    throw new Error("LV mit erteiltem Zuschlag kann nicht über die Kalkulation geändert werden.");
+  }
   return kalk;
 }
 
@@ -28,12 +31,12 @@ export async function kalkParamsAendern(
   await prisma.kalkulation.update({
     where: { id: kalk.id },
     data: {
-      mittellohnkosten: params.mittellohnkosten,
-      zuschlagLohn: params.zuschlagLohn,
-      zuschlagMaterial: params.zuschlagMaterial,
-      zuschlagGeraet: params.zuschlagGeraet,
-      zuschlagFremd: params.zuschlagFremd,
-      zuschlagSonstiges: params.zuschlagSonstiges,
+      mittellohnkosten: endlicheZahl(params.mittellohnkosten, "Mittellohnkosten"),
+      zuschlagLohn: endlicheZahl(params.zuschlagLohn, "Zuschlag Lohn"),
+      zuschlagMaterial: endlicheZahl(params.zuschlagMaterial, "Zuschlag Material"),
+      zuschlagGeraet: endlicheZahl(params.zuschlagGeraet, "Zuschlag Gerät"),
+      zuschlagFremd: endlicheZahl(params.zuschlagFremd, "Zuschlag Fremdleistung"),
+      zuschlagSonstiges: endlicheZahl(params.zuschlagSonstiges, "Zuschlag Sonstiges"),
     },
   });
   revalidatePath(kalkPfad(kalk.lv.projektId, kalk.lv.id));
@@ -45,6 +48,41 @@ export interface AnsatzDaten {
   menge: number;
   einheit: string;
   preis: number;
+}
+
+const ANSATZ_ARTEN: ReadonlySet<string> = new Set([
+  "LOHN",
+  "MATERIAL",
+  "GERAET",
+  "FREMDLEISTUNG",
+  "SONSTIGES",
+]);
+
+function endlicheZahl(wert: unknown, feld: string): number {
+  if (typeof wert !== "number" || !Number.isFinite(wert)) {
+    throw new Error(`Ungültiger Wert für ${feld}`);
+  }
+  return wert;
+}
+
+/**
+ * Übernimmt nur die bekannten Felder (Server Actions sind öffentliche
+ * Endpunkte – ein Spread der Client-Daten könnte sonst kalkulationId oder
+ * positionId überschreiben) und validiert die Zahlen.
+ */
+function ansatzDaten(daten: Partial<AnsatzDaten>): Partial<AnsatzDaten> {
+  const d: Partial<AnsatzDaten> = {};
+  if (daten.art !== undefined) {
+    if (!ANSATZ_ARTEN.has(daten.art)) throw new Error("Ungültige Ansatzart");
+    d.art = daten.art;
+  }
+  if (daten.bezeichnung !== undefined) {
+    d.bezeichnung = String(daten.bezeichnung).trim();
+  }
+  if (daten.einheit !== undefined) d.einheit = String(daten.einheit).trim();
+  if (daten.menge !== undefined) d.menge = endlicheZahl(daten.menge, "Menge");
+  if (daten.preis !== undefined) d.preis = endlicheZahl(daten.preis, "Preis");
+  return d;
 }
 
 export async function ansatzAnlegen(
@@ -63,9 +101,9 @@ export async function ansatzAnlegen(
   });
   await prisma.kalkAnsatz.create({
     data: {
+      ...(ansatzDaten(daten) as AnsatzDaten),
       kalkulationId: kalk.id,
       positionId,
-      ...daten,
       sortier: (max._max.sortier ?? 0) + 1,
     },
   });
@@ -80,7 +118,7 @@ export async function ansatzAendern(
   const kalk = await kalkulationDesMandanten(kalkulationId);
   await prisma.kalkAnsatz.updateMany({
     where: { id: ansatzId, kalkulationId: kalk.id },
-    data: daten,
+    data: ansatzDaten(daten),
   });
   revalidatePath(kalkPfad(kalk.lv.projektId, kalk.lv.id));
 }

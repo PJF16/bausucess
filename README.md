@@ -42,6 +42,19 @@ Docker Desktop automatisch mit. Bei Datenbank-Problemen: `npm run db:logs`.
 
 Demo-Login: `demo@bausuccess.at` / `demo1234`
 
+**Hinweis zum Beleg-Snapshot-Backfill:** Die Migration ergänzt für bereits
+gelegte Rechnungen historische Belegkopien. Teilrechnungen werden aus den ihnen
+zugeordneten Aufmaßzeilen rekonstruiert. Bei älteren Schlussrechnungen stammen
+die Positions- und Zeilendaten aus den zum Migrationszeitpunkt noch vorhandenen
+Aufmaßzeilen; frühere Änderungen oder Löschungen lassen sich rückwirkend nicht
+zuverlässig rekonstruieren. Vor dem Produktiv-Upgrade sollten bestehende
+Schlussrechnungsbelege daher separat archiviert werden.
+
+Vertrags-LVs, die vor dieser Migration erzeugt wurden, haben noch keine
+eindeutige technische Verknüpfung zum bezuschlagten Angebot. Die Verknüpfung
+wird für neue Vertrags-LVs automatisch angelegt; ältere Verträge sollten vor
+einem Produktiv-Upgrade anhand ihrer Vergabeunterlagen geprüft werden.
+
 ## Produktiv starten (Docker)
 
 Die App wird als Docker-Stack betrieben: Next.js im Standalone-Modus
@@ -72,6 +85,19 @@ npm run deploy:down   # Stack stoppen (Daten bleiben im Volume erhalten)
 Für ein Update auf einen neuen Code-Stand: `npm run deploy:build && npm run
 deploy:up` – Compose ersetzt den App-Container, ausstehende Migrationen werden
 vor dem Start eingespielt, die Datenbank bleibt unangetastet.
+
+**Einmaliger Backfill nach dem Update auf den Rechnungs-Snapshot** (nur bei
+einer Bestandsinstallation, die schon vor diesem Update Rechnungen *gelegt*
+hatte): Rechnungen frieren ihre Beträge seit diesem Stand beim Legen ein.
+Bereits gelegte Alt-Rechnungen bekommen ihren Snapshot mit
+
+```bash
+docker compose --env-file .env.deploy -f docker-compose.prod.yml \
+  run --rm migrate npx tsx prisma/backfill-rechnungen.ts
+```
+
+Der Lauf ist idempotent; eine frische Installation hat keine Alt-Rechnungen
+und braucht ihn nicht.
 
 Hinweise:
 
@@ -107,10 +133,17 @@ Eventual- und Alternativpositionen zählen nicht zur LV-Summe.
       proportional zum Ausschreibungs-LV übernommen)
 - [x] **Phase 4 – Abrechnung**: Aufmaßblätter mit Formel-Ansätzen
       (z. B. `12,50*3,20-2*1,01`, sicherer Parser ohne eval in
-      `src/lib/aufmass.ts`), Mengenermittlung je Position mit
-      Soll-Vergleich, Teil-/Schlussrechnungen sammeln offene Aufmaße ein
-      (inkrementelle Abrechnung), Statusworkflow Entwurf → Gelegt → Bezahlt,
-      abgerechnete Zeilen sind gesperrt
+      `src/lib/aufmass.ts`; Punkt gilt nur als Tausendertrennzeichen bei
+      eindeutigem Muster, mehrdeutige Eingaben wie `1.200` werden abgelehnt),
+      Mengenermittlung je Position mit Soll-Vergleich und Überabrechnungs-
+      Warnung. Teilrechnungen rechnen die offenen Aufmaße inkrementell ab,
+      die Schlussrechnung kumuliert die Gesamtleistung und zieht die
+      Zahlbeträge der Teilrechnungen ab (ÖNORM B 2110: Deckungsrücklass wird
+      aufgelöst, Haftrücklass auf die Gesamtsumme). Beim Legen werden Beträge,
+      Einheitspreise und Konditionen als Snapshot eingefroren
+      (`src/lib/rechnung.ts`), sodass gelegte Rechnungen unveränderlich sind.
+      Statusworkflow Entwurf → Gelegt → Bezahlt serverseitig erzwungen;
+      abgerechnete Zeilen und Positionen sind gegen Löschen geschützt
 - [x] **Phase 5 – ÖNORM-Datenaustausch**: Export jedes LV als `.onlv`-XML
       (A-2063-angelehnt: Kenndaten, Gliederung HG/OG/LG/ULG, Preisanteile
       Lohn/Sonstiges) und toleranter Import als neues LV im Projekt

@@ -79,10 +79,17 @@ export default async function AbrechnungPage({
     nummer: r.nummer,
     art: r.art,
     status: r.status,
-    netto: r.zeilen.reduce(
-      (acc, z) => acc + Number(z.menge) * (epJePosition.get(z.positionId) ?? 0),
-      0
-    ),
+    // Gelegte Rechnungen zeigen den eingefrorenen Zahlbetrag, Entwürfe die
+    // live berechnete Leistungssumme.
+    betrag:
+      r.status !== "ENTWURF" && r.zahlbetrag !== null
+        ? Number(r.zahlbetrag)
+        : r.zeilen.reduce(
+            (acc, z) =>
+              acc + Number(z.menge) * (epJePosition.get(z.positionId) ?? 0),
+            0
+          ),
+    betragIstZahlbetrag: r.status !== "ENTWURF" && r.zahlbetrag !== null,
   }));
 
   const basisPfad = `/projekte/${lv.projekt.id}/lv/${lv.id}/abrechnung`;
